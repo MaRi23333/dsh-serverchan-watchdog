@@ -1,11 +1,19 @@
 /**
  * Build both halves of dsh-serverchan-watchdog:
- *  - node half:   src/index.ts          -> lib/index.js   (ESM, node)
- *  - client half: src/client/index.ts   -> lib/client.js  (CJS closure for window.__ModuleLoader__)
- * The client half imports nothing at runtime (type-only cordis import is erased),
- * so no externals are needed.
+ *  - node half:   src/index.ts            -> lib/index.js   (ESM, node)
+ *  - client half: src/client/index.tsx    -> lib/client.js  (CJS closure for window.__ModuleLoader__)
+ * Client externals mirror the loader module table (packages/client/web/src/platform.ts).
  */
 import { defineConfig } from 'tsdown'
+
+const PLATFORM_MODULES = [
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-web-react',
+  '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-ui-attachment',
+  '@deepseek-ai/dsh-client-schema-form',
+] as const
+
+const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, '@deepseek-ai/dsh-client-runtime/client']
 
 export default defineConfig([
   {
@@ -20,7 +28,7 @@ export default defineConfig([
   },
   {
     name: 'dsh-serverchan-watchdog/client',
-    entry: { client: 'src/client/index.ts' },
+    entry: { client: 'src/client/index.tsx' },
     outDir: 'lib',
     format: ['cjs'],
     platform: 'browser',
@@ -28,9 +36,11 @@ export default defineConfig([
     clean: false,
     dts: false,
     sourcemap: true,
+    external: [...CLIENT_EXTERNALS],
     define: {
       'process.env.NODE_ENV': JSON.stringify('production'),
     },
+    noExternal: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
     outputOptions: {
       entryFileNames: 'client.js',
       banner: 'window.__ModuleLoader__.load({ id: "dsh-serverchan-watchdog", factory: (require) => {',

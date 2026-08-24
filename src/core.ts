@@ -25,10 +25,10 @@ export interface PendingInteraction {
 
 /** Injected timing seam (tests use fake clocks; production uses real timers). */
 export interface TrackerOptions {
-  /** Delay from start to the first fire. */
-  thresholdMs: number
-  /** Delay between repeats while still pending; 0 = push once only. */
-  repeatMs: number
+  /** Delay from start to the first fire. A function is re-read per start, so a settings change applies to interactions watched from then on. */
+  thresholdMs: number | (() => number)
+  /** Delay between repeats while still pending; 0 = push once only. A function is re-read per fire. */
+  repeatMs: number | (() => number)
   /** Called when the threshold (or a repeat interval) elapses while still pending. */
   onFire: (pending: PendingInteraction) => Promise<void> | void
   now?: () => number
@@ -51,16 +51,18 @@ export class PendingTracker {
   private readonly now: () => number
   private readonly after: (ms: number, fn: () => void) => unknown
   private readonly cancel: (handle: unknown) => void
-  private readonly thresholdMs: number
-  private readonly repeatMs: number
+  private readonly thresholdMs: () => number
+  private readonly repeatMs: () => number
   private readonly onFire: TrackerOptions['onFire']
 
   constructor(options: TrackerOptions) {
     this.now = options.now ?? (() => Date.now())
     this.after = options.after ?? ((ms, fn) => setTimeout(fn, ms))
     this.cancel = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
-    this.thresholdMs = options.thresholdMs
-    this.repeatMs = options.repeatMs
+    const threshold = options.thresholdMs
+    const repeat = options.repeatMs
+    this.thresholdMs = typeof threshold === 'function' ? threshold : () => threshold
+    this.repeatMs = typeof repeat === 'function' ? repeat : () => repeat
     this.onFire = options.onFire
   }
 
@@ -76,7 +78,7 @@ export class PendingTracker {
   start(entry: Omit<PendingInteraction, 'startedAt' | 'pushes'>): void {
     if (this.entries.has(entry.id)) return
     const pending: PendingInteraction = { ...entry, startedAt: this.now(), pushes: 0 }
-    const timer = this.after(this.thresholdMs, () => { void this.fire(pending) })
+    const timer = this.after(this.thresholdMs(), () => { void this.fire(pending) })
     this.entries.set(entry.id, { pending, timer, repeat: undefined })
   }
 
@@ -122,10 +124,23 @@ export class PendingTracker {
     } catch {
       // Contained: a throwing pusher must not kill the next repeat.
     }
-    if (this.repeatMs > 0 && this.entries.get(pending.id) === entry) {
-      entry.repeat = this.after(this.repeatMs, () => { void this.fire(pending) })
+    if (this.repeatMs() > 0 && this.entries.get(pending.id) === entry) {
+      entry.repeat = this.after(this.repeatMs(), () => { void this.fire(pending) })
     }
   }
+}
+
+/**
+ * Validate one settings-page minute value as an integer within range.
+ * @param value - raw value from a settings patch.
+ * @param min - inclusive minimum.
+ * @param max - inclusive maximum.
+ * @returns the integer, or null when out of range / not a finite integer.
+ */
+export function minutesValue(value: unknown, min: number, max: number): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) return null
+  if (value < min || value > max) return null
+  return value
 }
 
 /**

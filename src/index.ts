@@ -15,7 +15,8 @@
  *
  * Routes (loopback-only; write routes also require JSON + loopback Origin):
  *   GET  /serverchan-watchdog/status  effective config summary + active pending list
- *   POST /serverchan-watchdog/config  { sendkey?, clearKey? } — encrypted store
+ *   GET  /serverchan-watchdog/config  editable settings view (never the key)
+ *   POST /serverchan-watchdog/config  { sendkey?, clearKey?, thresholdMinutes?, repeatMinutes?, proxy? }
  *   POST /serverchan-watchdog/test    send one test push with current settings
  *
  * The SendKey is encrypted with AES-256-GCM under a per-machine key file in
@@ -40,7 +41,7 @@ import { fetch as undiciFetch, ProxyAgent } from 'undici'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, truncate, type PendingInteraction, type PendingKind } from './core.ts'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, truncate, type PendingInteraction, type PendingKind } from './core.ts'
 
 export const name = 'serverchan-watchdog'
 
@@ -89,6 +90,40 @@ interface CipherBox {
 interface StateFile {
   version: 1
   sendkeyCipher?: CipherBox
+  /** Settings-page overrides; everything here beats the bundle-patch Config. */
+  thresholdMinutes?: number
+  repeatMinutes?: number
+  proxy?: string
+}
+
+/** Rejected settings patch; `code` maps directly to the API error. */
+class StoreError extends Error {
+  constructor(
+    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes',
+    message: string,
+  ) {
+    super(message)
+    this.name = 'StoreError'
+  }
+}
+
+/** One settings-page edit patch (undefined keeps, '' clears the field). */
+interface StorePatch {
+  sendkey?: string
+  clearKey?: boolean
+  thresholdMinutes?: number
+  repeatMinutes?: number
+  proxy?: string
+}
+
+/** Effective runtime values: settings-store overrides merged over patch Config. */
+interface EffectiveSettings {
+  enabled: boolean
+  thresholdMinutes: number
+  repeatMinutes: number
+  title: string
+  webUrl: string
+  proxy: string
 }
 
 /** Best-effort Windows ACL tightening: current user only, inheritance removed. */
@@ -158,8 +193,8 @@ function decrypt(box: CipherBox, key: Buffer): string {
   }
 }
 
-/** Encrypted on-disk SendKey store (AES-256-GCM under per-machine key.bin). */
-class SecretStore {
+/** Encrypted on-disk settings store (AES-256-GCM under per-machine key.bin). */
+class SettingsStore {
   private readonly filePath: string
   private readonly key: Buffer
 
@@ -169,29 +204,93 @@ class SecretStore {
     this.key = loadOrCreateKey(dir)
   }
 
+  /** Decrypted stored SendKey / push URL, or '' when none. */
   get sendkey(): string {
+    const file = this.read()
+    return file.sendkeyCipher === undefined ? '' : decrypt(file.sendkeyCipher, this.key)
+  }
+
+  get hasStoredKey(): boolean {
+    return this.read().sendkeyCipher !== undefined
+  }
+
+  get thresholdMinutes(): number | undefined {
+    return this.read().thresholdMinutes
+  }
+
+  get repeatMinutes(): number | undefined {
+    return this.read().repeatMinutes
+  }
+
+  /** Stored proxy (sanitized, '' when none). */
+  get proxy(): string {
+    return this.read().proxy ?? ''
+  }
+
+  /**
+   * Apply one validated patch. Everything is validated before anything is
+   * written, so a rejected field cannot leave a partially-applied store.
+   * @param patch - settings-page edit; undefined keeps, '' clears.
+   * @throws {StoreError} when any provided value is rejected.
+   */
+  update(patch: StorePatch): void {
+    const next = this.read()
+    if (patch.sendkey !== undefined && patch.sendkey.trim() !== '') {
+      if (buildPushUrl(patch.sendkey) === null) {
+        throw new StoreError('invalid-sendkey', 'SendKey/URL 不是合法的 ServerChan 凭据')
+      }
+      if (patch.clearKey !== true) next.sendkeyCipher = encrypt(patch.sendkey.trim(), this.key)
+    }
+    if (patch.clearKey === true) delete next.sendkeyCipher
+    if (patch.thresholdMinutes !== undefined) {
+      const value = minutesValue(patch.thresholdMinutes, 1, 1440)
+      if (value === null) throw new StoreError('invalid-minutes', '阈值必须为 1–1440 的整数分钟')
+      next.thresholdMinutes = value
+    }
+    if (patch.repeatMinutes !== undefined) {
+      const value = minutesValue(patch.repeatMinutes, 0, 1440)
+      if (value === null) throw new StoreError('invalid-minutes', '重复间隔必须为 0–1440 的整数分钟')
+      next.repeatMinutes = value
+    }
+    if (patch.proxy !== undefined) {
+      const trimmed = patch.proxy.trim()
+      if (trimmed === '') {
+        delete next.proxy
+      } else {
+        const normalized = proxyOf(trimmed)
+        if (normalized === null) {
+          throw new StoreError('invalid-proxy', '代理必须是 http(s):// 且不含用户名密码')
+        }
+        next.proxy = normalized
+      }
+    }
+    next.version = 1
+    this.write(next)
+  }
+
+  /** BOM/whitespace-tolerant parse; malformed or invalid fields are dropped. */
+  private read(): StateFile {
     try {
       const raw = readFileSync(this.filePath).toString('utf8').replace(/^\uFEFF/, '').trim()
-      if (raw === '') return ''
+      if (raw === '') return { version: 1 }
       const parsed = JSON.parse(raw) as Partial<StateFile>
-      if (parsed.version !== 1 || parsed.sendkeyCipher === undefined) return ''
-      return decrypt(parsed.sendkeyCipher, this.key)
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { version: 1 }
+      const file: StateFile = { version: 1 }
+      if (parsed.sendkeyCipher !== undefined && parsed.sendkeyCipher !== null) {
+        file.sendkeyCipher = parsed.sendkeyCipher as CipherBox
+      }
+      const threshold = minutesValue(parsed.thresholdMinutes, 1, 1440)
+      if (threshold !== null) file.thresholdMinutes = threshold
+      const repeat = minutesValue(parsed.repeatMinutes, 0, 1440)
+      if (repeat !== null) file.repeatMinutes = repeat
+      if (typeof parsed.proxy === 'string') {
+        const normalized = proxyOf(parsed.proxy)
+        if (normalized !== null) file.proxy = normalized
+      }
+      return file
     } catch {
-      return ''
+      return { version: 1 }
     }
-  }
-
-  set(value: string): void {
-    const trimmed = value.trim()
-    if (trimmed === '') {
-      this.write({ version: 1 })
-      return
-    }
-    this.write({ version: 1, sendkeyCipher: encrypt(trimmed, this.key) })
-  }
-
-  clear(): void {
-    this.write({ version: 1 })
   }
 
   private write(file: StateFile): void {
@@ -201,6 +300,44 @@ class SecretStore {
     // The ciphertext is only as safe as the directory the key lives in:
     // tighten the same way key.bin is tightened.
     tightenAcl(this.filePath)
+  }
+}
+
+/** Merge settings-store overrides over the bundle-patch Config. */
+function effectiveOf(config: Config, store: SettingsStore): EffectiveSettings {
+  return {
+    enabled: config.enabled ?? true,
+    thresholdMinutes: store.thresholdMinutes ?? config.thresholdMinutes ?? 5,
+    repeatMinutes: store.repeatMinutes ?? config.repeatMinutes ?? 0,
+    title: (config.title ?? '').trim() || 'DSH 等待人工确认',
+    webUrl: (config.webUrl ?? '').trim() || 'http://127.0.0.1:3080',
+    proxy: store.proxy !== '' ? store.proxy : (proxyOf(config.proxy ?? '') ?? ''),
+  }
+}
+
+/** Nothing that a response may expose: credentials stay encrypted on disk. */
+function editableView(config: Config, store: SettingsStore): {
+  enabled: boolean
+  thresholdMinutes: number
+  repeatMinutes: number
+  title: string
+  webUrl: string
+  proxy: string
+  credentialConfigured: boolean
+  hasStoredKey: boolean
+  stateDir: string
+} {
+  const eff = effectiveOf(config, store)
+  return {
+    enabled: eff.enabled,
+    thresholdMinutes: eff.thresholdMinutes,
+    repeatMinutes: eff.repeatMinutes,
+    title: eff.title,
+    webUrl: eff.webUrl,
+    proxy: redactProxy(eff.proxy),
+    credentialConfigured: resolveCredential(config, store) !== '',
+    hasStoredKey: store.hasStoredKey,
+    stateDir: stateDirOf(config),
   }
 }
 
@@ -270,7 +407,7 @@ async function sendPush(url: string, proxy: string, title: string, desp: string)
   }
 }
 
-function resolveCredential(config: Config, store: SecretStore): string {
+function resolveCredential(config: Config, store: SettingsStore): string {
   const fromFile = store.sendkey
   if (fromFile !== '') return fromFile
   const fromConfig = (config.sendkey ?? '').trim()
@@ -283,16 +420,16 @@ function pushTitle(config: Config, pending: PendingInteraction): string {
   return pending.pushes > 1 ? `${base}（第 ${pending.pushes} 次）` : base
 }
 
-function pushDesp(pending: PendingInteraction, config: Config): string {
+function pushDesp(pending: PendingInteraction, config: Config, eff: EffectiveSettings): string {
   const elapsedMinutes = Math.max(0, Math.floor((Date.now() - pending.startedAt) / 60_000))
   return [
     `**类型**：${KIND_LABELS[pending.kind]}`,
     `**会话**：\`${pending.sessionId}\``,
     `**内容**：${truncate(pending.detail, 300)}`,
-    `**已等待**：${elapsedMinutes} 分钟（阈值 ${config.thresholdMinutes} 分钟）`,
+    `**已等待**：${elapsedMinutes} 分钟（阈值 ${eff.thresholdMinutes} 分钟）`,
     `**状态**：${pending.pushes > 1 ? `已提醒 ${pending.pushes} 次，仍未处理` : '超过阈值未处理'}`,
     '',
-    `👉 [打开 DeepSeek Harness](${config.webUrl})`,
+    `👉 [打开 DeepSeek Harness](${eff.webUrl})`,
   ].join('\n')
 }
 
@@ -348,19 +485,21 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise
 
 export function apply(ctx: Context, config: Config): void {
   const log = ctx.logger('serverchan-watchdog')
-  const store = new SecretStore(stateDirOf(config))
-  const thresholdMs = (config.thresholdMinutes ?? 5) * 60_000
-  const repeatMs = (config.repeatMinutes ?? 0) * 60_000
+  const store = new SettingsStore(stateDirOf(config))
+
+  // Live effective settings: the settings page edits the store, so threshold /
+  // repeat / proxy are re-read per event instead of frozen at boot.
+  const settings = (): EffectiveSettings => effectiveOf(config, store)
 
   const pushNow = async (credential: string, title: string, desp: string): Promise<PushResult> => {
     const url = buildPushUrl(credential)
     if (url === null) return { ok: false, message: 'SendKey/URL 无效或未配置' }
-    return sendPush(url, proxyOf(config.proxy ?? '') ?? '', title, desp)
+    return sendPush(url, settings().proxy, title, desp)
   }
 
   const tracker = new PendingTracker({
-    thresholdMs,
-    repeatMs,
+    thresholdMs: () => settings().thresholdMinutes * 60_000,
+    repeatMs: () => settings().repeatMinutes * 60_000,
     onFire: async (pending) => {
       // Re-check right before publishing: a stop() that landed while a
       // previous push (or the threshold tick) was in flight must not send a
@@ -371,7 +510,7 @@ export function apply(ctx: Context, config: Config): void {
         log.warn(`pending ${pending.id} not pushed: no ServerChan credential configured`)
         return
       }
-      const result = await pushNow(credential, pushTitle(config, pending), pushDesp(pending, config))
+      const result = await pushNow(credential, pushTitle(config, pending), pushDesp(pending, config, settings()))
       if (result.ok) {
         log.info(`pushed ${pending.kind} reminder (${pending.id}, push #${pending.pushes})`)
       } else {
@@ -389,7 +528,8 @@ export function apply(ctx: Context, config: Config): void {
     questionQueues.clear()
   }, 'serverchan-watchdog: teardown')
 
-  if ((config.enabled ?? true) && (config.thresholdMinutes ?? 5) > 0) {
+  const boot = settings()
+  if (boot.enabled && boot.thresholdMinutes > 0) {
     ctx.on('session/event', (session: Session, event: SessionEvent) => {
       if (event.type === 'tool/call') {
         const callId = event.data.callId
@@ -478,13 +618,7 @@ export function apply(ctx: Context, config: Config): void {
         if (!guardLoopback(req, res)) return
         sendJson(res, 200, {
           ok: true,
-          enabled: config.enabled ?? true,
-          thresholdMinutes: config.thresholdMinutes ?? 5,
-          repeatMinutes: config.repeatMinutes ?? 0,
-          title: config.title ?? 'DSH 等待人工确认',
-          webUrl: config.webUrl ?? 'http://127.0.0.1:3080',
-          proxy: redactProxy(config.proxy ?? ''),
-          credentialConfigured: resolveCredential(config, store) !== '',
+          ...editableView(config, store),
           pending: tracker.list(),
         })
       },
@@ -494,6 +628,11 @@ export function apply(ctx: Context, config: Config): void {
       kind: 'exact',
       path: '/serverchan-watchdog/config',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method === 'GET') {
+          if (!guardLoopback(req, res)) return
+          sendJson(res, 200, { ok: true, ...editableView(config, store) })
+          return
+        }
         if (req.method !== 'POST') {
           sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
           return
@@ -510,23 +649,30 @@ export function apply(ctx: Context, config: Config): void {
           sendJson(res, 400, { ok: false, error: 'invalid-json' })
           return
         }
-        const record = body as { sendkey?: unknown; clearKey?: unknown }
-        if (record.clearKey === true) {
-          store.clear()
-          sendJson(res, 200, { ok: true })
-          return
-        }
-        if (typeof record.sendkey !== 'string') {
+        const record = body as Record<string, unknown>
+        const patch: StorePatch = {}
+        if (record['clearKey'] === true) patch.clearKey = true
+        if (typeof record['sendkey'] === 'string') patch.sendkey = record['sendkey']
+        if (typeof record['thresholdMinutes'] === 'number') patch.thresholdMinutes = record['thresholdMinutes']
+        if (typeof record['repeatMinutes'] === 'number') patch.repeatMinutes = record['repeatMinutes']
+        if (typeof record['proxy'] === 'string') patch.proxy = record['proxy']
+        if (Object.keys(patch).length === 0) {
           sendJson(res, 400, { ok: false, error: 'nothing-to-save' })
           return
         }
-        if (buildPushUrl(record.sendkey) === null) {
-          sendJson(res, 400, { ok: false, error: 'invalid-sendkey' })
+        try {
+          store.update(patch)
+        } catch (error) {
+          if (error instanceof StoreError) {
+            sendJson(res, 400, { ok: false, error: error.code, message: error.message })
+          } else {
+            log.warn(`config save failed: ${error instanceof Error ? error.message : String(error)}`)
+            sendJson(res, 500, { ok: false, error: 'save-failed' })
+          }
           return
         }
-        store.set(record.sendkey)
-        log.info('sendkey stored (encrypted)')
-        sendJson(res, 200, { ok: true })
+        log.info('settings saved (sendkey encrypted)')
+        sendJson(res, 200, { ok: true, ...editableView(config, store) })
       },
     }), 'serverchan-watchdog: config route')
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall } from '../src/core.ts'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue } from '../src/core.ts'
 
 test('buildPushUrl: classic SendKey', () => {
   assert.equal(buildPushUrl('SCTabc'), 'https://sctapi.ftqq.com/SCTabc.send')
@@ -128,4 +128,74 @@ test('PendingTracker uses an injected clock', () => {
   now = 5_000
   assert.equal(tracker.list()[0]?.startedAt, 1_000)
   tracker.dispose()
+})
+
+test('PendingTracker re-reads a dynamic threshold per start', async () => {
+  let thresholdMs = 50
+  const fired: string[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: () => thresholdMs,
+    repeatMs: 0,
+    onFire: p => { fired.push(p.id) },
+  })
+  tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
+  thresholdMs = 5_000
+  await new Promise(resolve => setTimeout(resolve, 90))
+  assert.deepEqual(fired, ['q:1']) // fired with the value at start time (50ms)
+  tracker.dispose()
+})
+
+test('PendingTracker re-reads a dynamic repeat interval per fire', async () => {
+  // Deterministic fake clock: manual ticks (microtask-flushed) leave no real timers behind.
+  let clock = 0
+  let repeatMs = 15
+  const todos: Array<{ at: number; fn: () => void; done: boolean }> = []
+  const fired: string[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: 15,
+    repeatMs: () => repeatMs,
+    now: () => clock,
+    after: (ms, fn) => {
+      const entry = { at: clock + ms, fn, done: false }
+      todos.push(entry)
+      return entry
+    },
+    cancel: entry => { (entry as { done: boolean }).done = true },
+    onFire: p => { fired.push(p.id) },
+  })
+  tracker.start({ id: 'a:2', kind: 'approval', sessionId: 's', detail: 'd' })
+  const tick = async (): Promise<void> => {
+    clock += 1
+    for (const entry of [...todos]) {
+      if (!entry.done && entry.at <= clock) {
+        entry.done = true
+        entry.fn()
+      }
+    }
+    // fire() is async: its repeat-scheduling continuation lands in a microtask
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  // threshold fire at 15, then repeats at 30/45 with the 15ms cadence
+  for (let i = 0; i < 45; i += 1) await tick()
+  assert.ok(fired.length >= 3)
+  repeatMs = 60_000
+  // the repeat already scheduled at clock 60 still fires once; the cadence
+  // re-read at fire time prevents anything after it.
+  for (let i = 0; i < 30; i += 1) await tick()
+  const count = fired.length
+  for (let i = 0; i < 200; i += 1) await tick()
+  assert.equal(fired.length, count)
+  tracker.dispose()
+})
+
+test('minutesValue accepts integer minutes within range only', () => {
+  assert.equal(minutesValue(5, 1, 1440), 5)
+  assert.equal(minutesValue(1440, 1, 1440), 1440)
+  assert.equal(minutesValue(0, 0, 1440), 0)
+  assert.equal(minutesValue(0, 1, 1440), null)
+  assert.equal(minutesValue(1441, 0, 1440), null)
+  assert.equal(minutesValue(2.5, 1, 1440), null)
+  assert.equal(minutesValue('5', 1, 1440), null)
+  assert.equal(minutesValue(undefined, 1, 1440), null)
+  assert.equal(minutesValue(Infinity, 1, 1440), null)
 })
