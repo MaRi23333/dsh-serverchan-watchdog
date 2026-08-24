@@ -1,2 +1,21 @@
 node_modules/
+*.log
+.DS_Store
+*.tmp
+.env
+.env.*
+settings.json
+key.bin
+coverage/
 *.tsbuildinfo
+
+# Dev-machine stopgap: type paths pointing at a sibling plugin's node_modules
+# while the registry is unreachable. Remove once `pnpm install` succeeds.
+tsconfig.local.json
+
+# Internal handoff doc (HANDOFF.md) stays out of the published repo:
+# it contains local machine paths. Keep the file on disk for local dev.
+HANDOFF.md
+
+# Internal dev docs stay local too.
+docs/

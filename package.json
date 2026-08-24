@@ -14,9 +14,18 @@
   ],
   "type": "module",
   "main": "lib/index.js",
+  "private": true,
   "packageManager": "pnpm@11.21.0",
   "engines": {
     "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/<your-name>/dsh-serverchan-watchdog.git"
+  },
+  "homepage": "https://github.com/<your-name>/dsh-serverchan-watchdog#readme",
+  "bugs": {
+    "url": "https://github.com/<your-name>/dsh-serverchan-watchdog/issues"
   },
   "exports": {
     ".": {
@@ -32,6 +41,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "LICENSE"
   ],
   "dsh": {

@@ -1,5 +1,7 @@
 # dsh-serverchan-watchdog
 
+**[中文](README.md) | [English](./README.en.md)**
+
 DeepSeek Harness（DSH）插件：当人工确认（审批 / 计划评审 / `ask_user_question` 问答）**超过阈值（默认 5 分钟）没有回复**时，通过 [ServerChan（Server酱）](https://sct.ftqq.com/) 推送消息到你的微信。
 
 适合"偶尔路过电脑才看一眼，人不在电脑前就错过审批问答"的场景：检测在 DSH **主机端**进行（基于会话事件流），浏览器关着、人不在电脑前也能推送。
@@ -23,11 +25,14 @@ DeepSeek Harness（DSH）插件：当人工确认（审批 / 计划评审 / `ask
 ## 安装
 
 ```powershell
-# 本地开发目录（或 git 地址 / npm 包名）
-dsh plugin --profile web add E:\E盘项目区\dsh-plugin-dev\plugins\dsh-serverchan-watchdog
+# 从 git 仓库（推荐，仓库地址发布时定稿）
+dsh plugin --profile web add git+https://github.com/<your-name>/dsh-serverchan-watchdog.git
+
+# 或本地路径（开发时）
+dsh plugin --profile web add <本仓库的绝对路径>
 ```
 
-重启 `dsh web`（在 dsh-plugin-dev 根目录的普通终端执行 `.\tools\restart-web.ps1`，不要在 dsh web 会话里执行）。
+安装后在**普通终端**重启 `dsh web`（不要在 dsh web 会话里执行重启）。
 
 ## 配置
 
@@ -83,7 +88,7 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:3080/serverchan-watchdog/co
 - 提醒计时在内存中：`dsh web` 重启后，仍在等待的交互不再提醒（但会自动被下次的人工答复正常终结）。
 - 只监听本插件加载后**新产生**的人工交互。
 - 本插件与 `dsh-smart-approval` 的合作方式：审查器自动批复的审批会在几秒内打出 `approval/decided`，不会触发推送；只有真的悬而未决的交互才会提醒。
-- 加密存储是"readable by anyone who can read the plugin state dir"：`key.bin` 与密文同在 `$DSH_HOME/serverchan-watchdog/`，ACL 收紧到当前用户；能读取该目录的账号即可解出 SendKey（与 dsh-fish-tts 同一方案，非 DPAPI）。
+- 加密存储是"readable by anyone who can read the plugin state dir"：`key.bin` 与密文同在 `$DSH_HOME/serverchan-watchdog/`，ACL 收紧到当前用户；能读取该目录的账号即可解出 SendKey（本机 AES 密钥方案，非 DPAPI 系统凭据库）。
 - 推送请求在发送前会复查该交互是否仍在等待（避免"刚回答完还推一条"），但不支持取消已发出的 HTTP 请求。
 - 设置页保存的阈值/重复间隔/代理即时生效：新开始的等待用新阈值；重复间隔在每次推送前重新读取。
 
@@ -92,5 +97,7 @@ Invoke-WebRequest -Method Post -Uri http://127.0.0.1:3080/serverchan-watchdog/co
 ```powershell
 pnpm install
 pnpm test                 # 核心逻辑单测（tsx + node:test）
-.\..\..\tools\build.ps1 dsh-serverchan-watchdog   # 或 pnpm run typecheck && pnpm run build
+pnpm run typecheck && pnpm run build
 ```
+
+CI（`.github/workflows/ci.yml`）：Node 22/24 矩阵上跑 typecheck + 单测 + 构建，并校验 `lib/` 产物与提交一致。
