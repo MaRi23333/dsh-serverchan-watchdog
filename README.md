@@ -2,7 +2,7 @@
 
 **中文** | [English](./README.en.md)
 
-DeepSeek Harness（DSH）插件：当人工确认（审批 / 计划评审 / `ask_user_question` 问答）**超过阈值（默认 5 分钟）没有回复**时，通过 [ServerChan（Server酱）](https://sct.ftqq.com/) 推送消息到你的微信。
+**Server酱推送小助手**（英文包名 `dsh-serverchan-watchdog`）——DeepSeek Harness（DSH）插件：当人工确认（审批 / 计划评审 / `ask_user_question` 问答）**超过阈值（默认 5 分钟）没有回复**时，通过 [ServerChan（Server酱）](https://sct.ftqq.com/) 推送消息到你的微信。
 
 适合"偶尔路过电脑才看一眼，人不在电脑前就错过审批问答"的场景：检测在 DSH **主机端**进行（基于会话事件流），浏览器关着、人不在电脑前也能推送。
 
@@ -39,7 +39,7 @@ dsh plugin --profile web add <本仓库的绝对路径>
 
 ### 1. 设置页（推荐）
 
-重启后在 DSH 设置页 → 插件 → **微信提醒 (ServerChan)**：
+重启后在 DSH 设置页 → 插件 → **Server酱推送小助手**：
 
 - **推送地址 / SendKey**：填 ServerChan 控制台的 SendKey（经典版 `SCT...` 或 Server酱³ `sctp...`）或完整推送 URL；加密（AES-256-GCM）存本机 `$DSH_HOME/serverchan-watchdog/state.json`，永不回显
 - **阈值（分钟）**：默认 5；**重复提醒间隔（分钟）**：默认 0（只提醒一次）

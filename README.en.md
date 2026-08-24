@@ -2,7 +2,8 @@
 
 [中文](./README.md) | **English**
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin
+(中文名：**Server酱推送小助手**) that
 pushes a **WeChat message via [ServerChan](https://sct.ftqq.com/)** when a human
 confirmation — approval, plan review, or an `ask_user_question` answer — stays
 **unanswered past the threshold (default 5 minutes)**.
@@ -62,7 +63,7 @@ Restart `dsh web` from a **normal terminal** (not from inside a dsh web session)
 
 ### 1. Settings page (recommended)
 
-After the restart: DSH settings → Plugins → **WeChat alerts (ServerChan)**:
+After the restart: DSH settings → Plugins → **WeChat alerts (ServerChan)** (设置页标题：Server酱推送小助手):
 
 - **Push URL / SendKey**: the SendKey from the ServerChan console (classic
   `SCT...` or Server酱³ `sctp...`) or the full push URL; stored encrypted

@@ -40,8 +40,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 export const zh: Record<WatchdogKey, string> = {
-  'settings.label': '微信提醒 (ServerChan)',
-  'settings.title': '人工确认超时微信提醒（ServerChan）',
+  'settings.label': 'Server酱推送小助手',
+  'settings.title': 'Server酱推送小助手',
   'settings.credential': '推送地址 / SendKey',
   'settings.credential.hint': 'ServerChan 控制台的 SendKey（经典 SCT… 或 Server酱³ sctp…），或完整推送 URL；加密存储在本机，不会回显',
   'settings.credential.placeholder': '已保存（留空保持不变）',
