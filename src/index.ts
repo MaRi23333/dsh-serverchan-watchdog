@@ -198,6 +198,9 @@ class SecretStore {
     const temp = `${this.filePath}.tmp-${process.pid}`
     writeFileSync(temp, JSON.stringify(file, null, 2), { mode: 0o600 })
     renameSync(temp, this.filePath)
+    // The ciphertext is only as safe as the directory the key lives in:
+    // tighten the same way key.bin is tightened.
+    tightenAcl(this.filePath)
   }
 }
 
@@ -257,7 +260,11 @@ async function sendPush(url: string, proxy: string, title: string, desp: string)
     if (code !== 0) return { ok: false, message: `server code ${String(code)}` }
     return { ok: true, message: 'pushed' }
   } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    // Never echo raw error text: undici/node may include the request URL
+    // (and thus the SendKey) in the message, so responses and logs stay
+    // class-only.
+    const detail = error instanceof Error && error.name === 'AbortError' ? 'timeout' : 'network-failed'
+    return { ok: false, message: detail }
   } finally {
     if (dispatcher !== undefined) void dispatcher.close()
   }
@@ -355,6 +362,10 @@ export function apply(ctx: Context, config: Config): void {
     thresholdMs,
     repeatMs,
     onFire: async (pending) => {
+      // Re-check right before publishing: a stop() that landed while a
+      // previous push (or the threshold tick) was in flight must not send a
+      // stale notice for an already-answered interaction.
+      if (!tracker.has(pending.id)) return
       const credential = resolveCredential(config, store)
       if (credential === '') {
         log.warn(`pending ${pending.id} not pushed: no ServerChan credential configured`)
@@ -449,10 +460,14 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
-  const mount = (): void => {
-    const web = ctx.webServer
+  // The webserver row belongs to another bundle layer and may activate after
+  // this row: ctx.inject waits for it (the subagent-library pattern) instead
+  // of touching ctx.webServer as a property, which throws on an undeclared
+  // service before the webserver exists.
+  ctx.inject(['webServer'], (wctx: Context) => {
+    const web = wctx.webServer
 
-    ctx.effect(() => web.register({
+    wctx.effect(() => web.register({
       kind: 'exact',
       path: '/serverchan-watchdog/status',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -475,7 +490,7 @@ export function apply(ctx: Context, config: Config): void {
       },
     }), 'serverchan-watchdog: status route')
 
-    ctx.effect(() => web.register({
+    wctx.effect(() => web.register({
       kind: 'exact',
       path: '/serverchan-watchdog/config',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -484,7 +499,13 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         if (!guardWrite(req, res)) return
-        const body = await readJsonBody(req)
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'body-too-large' })
+          return
+        }
         if (body === null || typeof body !== 'object' || Array.isArray(body)) {
           sendJson(res, 400, { ok: false, error: 'invalid-json' })
           return
@@ -509,7 +530,7 @@ export function apply(ctx: Context, config: Config): void {
       },
     }), 'serverchan-watchdog: config route')
 
-    ctx.effect(() => web.register({
+    wctx.effect(() => web.register({
       kind: 'exact',
       path: '/serverchan-watchdog/test',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -526,14 +547,5 @@ export function apply(ctx: Context, config: Config): void {
         sendJson(res, 200, { ok: result.ok, message: result.message })
       },
     }), 'serverchan-watchdog: test route')
-  }
-
-  if (ctx.webServer !== undefined) {
-    mount()
-  } else {
-    // The webserver row can activate after this bundle row; re-attempt on service arrival.
-    ctx.on('internal/service', (service: string) => {
-      if (service === 'webServer') mount()
-    })
-  }
+  })
 }

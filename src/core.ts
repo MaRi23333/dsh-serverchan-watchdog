@@ -92,6 +92,16 @@ export class PendingTracker {
     this.entries.delete(id)
   }
 
+  /**
+   * Whether one interaction is still being watched. A fire callback should
+   * re-check this right before publishing, so a `stop()` that lands while the
+   * callback awaits (e.g. an HTTP push in flight) cannot send a stale notice.
+   * @param id - the identity passed to {@link start}.
+   */
+  has(id: string): boolean {
+    return this.entries.has(id)
+  }
+
   /** Snapshot of the active interactions. */
   list(): PendingInteraction[] {
     return [...this.entries.values()].map(entry => ({ ...entry.pending }))
@@ -120,17 +130,36 @@ export class PendingTracker {
 
 /**
  * Resolve a ServerChan delivery URL from a credential that is either a full
- * https push URL, an sctp SendKey ("sctp<uid>t<rest>"), or a classic SendKey.
- * @returns the delivery URL, or null for an empty/malformed credential.
+ * https push URL (ServerChan's own hosts only), an sctp SendKey
+ * ("sctp<uid>t<rest>"), or a classic SendKey.
+ * @returns the delivery URL, or null for an empty/malformed credential. A
+ *   full URL on any other host, an http:// URL, or an uppercase "SCTP" key is
+ *   rejected — an arbitrary host would turn the config endpoint into a
+ *   form-POST proxy and leak the key; the official hosts are fixed.
  */
 export function buildPushUrl(credential: string): string | null {
   const value = credential.trim()
   if (value === '') return null
-  if (/^https?:\/\//i.test(value)) return value
+  if (/^https:\/\//i.test(value)) {
+    let host: string
+    try {
+      host = new URL(value).host
+    } catch {
+      return null
+    }
+    if (host === 'sctapi.ftqq.com' || /^\d+\.push\.ft07\.com$/.test(host)) return value
+    return null
+  }
+  // Any other URL-shaped credential (http://, ftp://, …) is rejected up front
+  // instead of being misused as a classic SendKey.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return null
   if (value.startsWith('sctp')) {
     const match = /^sctp(\d+)t/.exec(value)
     return match === null ? null : `https://${match[1]}.push.ft07.com/send/${value}.send`
   }
+  // "SCTP..." (uppercase) is not a valid Server酱³ key; misrouting it to the
+  // classic endpoint would fail with a confusing 403, so reject it up front.
+  if (/^sctp/i.test(value)) return null
   return `https://sctapi.ftqq.com/${value}.send`
 }
 

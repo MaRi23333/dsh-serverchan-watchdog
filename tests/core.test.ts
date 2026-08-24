@@ -23,6 +23,20 @@ test('buildPushUrl: malformed credentials are rejected', () => {
   assert.equal(buildPushUrl('   '), null)
 })
 
+test('buildPushUrl: uppercase SCTP is rejected, not misrouted to the classic endpoint', () => {
+  assert.equal(buildPushUrl('SCTP123tAb'), null)
+})
+
+test('buildPushUrl: full URL limited to official ServerChan hosts (https only)', () => {
+  assert.equal(buildPushUrl('https://sctapi.ftqq.com/SCTa.send'), 'https://sctapi.ftqq.com/SCTa.send')
+  assert.equal(
+    buildPushUrl('https://42.push.ft07.com/send/sctp42tX.send'),
+    'https://42.push.ft07.com/send/sctp42tX.send',
+  )
+  assert.equal(buildPushUrl('http://127.0.0.1:8080/send'), null)
+  assert.equal(buildPushUrl('https://evil.example.com/x'), null)
+})
+
 test('describeQuestionCall parses a question payload', () => {
   const raw = JSON.stringify({ questions: [{ id: 'q1', question: '继续吗？' }] })
   assert.deepEqual(describeQuestionCall(raw), { kind: 'question', detail: '继续吗？' })
@@ -87,6 +101,15 @@ test('PendingTracker.start is idempotent and stop of unknown id is a no-op', asy
   assert.equal(tracker.size, 1)
   tracker.stop('q:unknown')
   assert.equal(tracker.size, 1)
+  tracker.dispose()
+})
+
+test('PendingTracker.has reflects the active set', () => {
+  const tracker = new PendingTracker({ thresholdMs: 1000, repeatMs: 0, onFire: () => {} })
+  tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
+  assert.equal(tracker.has('q:1'), true)
+  tracker.stop('q:1')
+  assert.equal(tracker.has('q:1'), false)
   tracker.dispose()
 })
 

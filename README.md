@@ -12,7 +12,9 @@ DeepSeek Harness（DSH）插件：当人工确认（审批 / 计划评审 / `ask
   - 工具审批 / 沙箱升级（`approval/asked` → `approval/decided` 配对，与 `dsh-smart-approval` 等审批器共存：快速自动答复不会推送）
 - 一次交互只推一次（`repeatMinutes > 0` 可开启重复提醒，默认关闭）
 - 推送内容：类型（问答/计划评审/审批）、会话 ID、问题文本或审批原因、已等待时长、打开 Harness 的链接
-- SendKey 用 AES-256-GCM 加密存本机（`$DSH_HOME/serverchan-watchdog/state.json` + `key.bin`），不进仓库、不进日志、不在接口响应中出现
+- SendKey 用 AES-256-GCM 加密存本机（`$DSH_HOME/serverchan-watchdog/state.json` + 本机 `key.bin`，两者都收紧 ACL），不进仓库、不进日志、不在接口响应中出现
+- 完整推送 URL 只接受 ServerChan 官方主机（`sctapi.ftqq.com` / `<uid>.push.ft07.com`，仅 https）；大写 `SCTP…` 之类非规范 key 会在保存时直接拒绝，避免静默打到错误端点
+- 推送失败只记录类别（HTTP 状态 / 服务端 code / timeout / network-failed），不回显原始错误（避免把 URL 里的 key 打进日志）
 - 支持代理（`proxy` 配置，http/https、不接受带账号密码的 URL）
 - 本机回环专用的状态/配置/测试接口（带 CSRF 防护）
 
@@ -25,7 +27,7 @@ DeepSeek Harness（DSH）插件：当人工确认（审批 / 计划评审 / `ask
 dsh plugin --profile web add E:\E盘项目区\dsh-plugin-dev\plugins\dsh-serverchan-watchdog
 ```
 
-重启 `dsh web`（普通终端执行 `tools\restart-web.ps1`，不要在 dsh web 会话里执行）。
+重启 `dsh web`（在 dsh-plugin-dev 根目录的普通终端执行 `.\tools\restart-web.ps1`，不要在 dsh web 会话里执行）。
 
 ## 配置
 
@@ -81,6 +83,8 @@ $env:DSH_SERVERCHAN_SENDKEY = '...'
 - 只监听本插件加载后**新产生**的人工交互。
 - 页面（浏览器侧）只有占位的空插件（为 modules 名册注册，无 UI 逻辑）。
 - 本插件与 `dsh-smart-approval` 的合作方式：审查器自动批复的审批会在几秒内打出 `approval/decided`，不会触发推送；只有真的悬而未决的交互才会提醒。
+- 加密存储是"readable by anyone who can read the plugin state dir"：`key.bin` 与密文同在 `$DSH_HOME/serverchan-watchdog/`，ACL 收紧到当前用户；能读取该目录的账号即可解出 SendKey（与 dsh-fish-tts 同一方案，非 DPAPI）。
+- 推送请求在发送前会复查该交互是否仍在等待（避免"刚回答完还推一条"），但不支持取消已发出的 HTTP 请求。
 
 ## 开发
 
