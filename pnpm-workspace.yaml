@@ -1,0 +1,5 @@
+# pnpm 11 build-script approval (settings moved out of package.json).
+# esbuild's postinstall is a legacy fallback; the platform binary
+# (@esbuild/*) is installed via optionalDependencies, so it can stay skipped.
+allowBuilds:
+  esbuild: false

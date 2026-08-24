@@ -1,0 +1,7 @@
+# dsh-serverchan-watchdog bundle patch: insert the host row into the composition.
+# The row id must be unique; `name` must equal the package name so the
+# client-modules roster can resolve it. No secrets ship here — the SendKey is
+# stored encrypted under $DSH_HOME/serverchan-watchdog/ (see README).
+- insert:
+    - id: serverchan-watchdog
+      name: dsh-serverchan-watchdog
