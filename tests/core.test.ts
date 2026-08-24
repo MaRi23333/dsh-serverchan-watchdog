@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue } from '../src/core.ts'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, recoverPending } from '../src/core.ts'
 
 test('buildPushUrl: classic SendKey', () => {
   assert.equal(buildPushUrl('SCTabc'), 'https://sctapi.ftqq.com/SCTabc.send')
@@ -198,4 +198,101 @@ test('minutesValue accepts integer minutes within range only', () => {
   assert.equal(minutesValue('5', 1, 1440), null)
   assert.equal(minutesValue(undefined, 1, 1440), null)
   assert.equal(minutesValue(Infinity, 1, 1440), null)
+})
+
+test('PendingTracker retries after a failed fire and stops after success', async () => {
+  let clock = 0
+  const todos: Array<{ at: number; fn: () => void; done: boolean }> = []
+  const fired: string[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: 10,
+    repeatMs: 0,
+    retryMs: 20,
+    now: () => clock,
+    after: (ms, fn) => {
+      const entry = { at: clock + ms, fn, done: false }
+      todos.push(entry)
+      return entry
+    },
+    cancel: entry => { (entry as { done: boolean }).done = true },
+    // first attempt fails, the retry succeeds → no further timers
+    onFire: () => {
+      fired.push('x')
+      return fired.length < 2 ? false : true
+    },
+  })
+  tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
+  const tick = async (): Promise<void> => {
+    clock += 1
+    for (const entry of [...todos]) {
+      if (!entry.done && entry.at <= clock) {
+        entry.done = true
+        entry.fn()
+      }
+    }
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  for (let i = 0; i < 40; i += 1) await tick()
+  assert.equal(fired.length, 2)
+  tracker.dispose()
+})
+
+test('PendingTracker does not retry a successful single push', async () => {
+  let clock = 0
+  const todos: Array<{ at: number; fn: () => void; done: boolean }> = []
+  const fired: string[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: 10,
+    repeatMs: 0,
+    retryMs: 5,
+    now: () => clock,
+    after: (ms, fn) => {
+      const entry = { at: clock + ms, fn, done: false }
+      todos.push(entry)
+      return entry
+    },
+    cancel: entry => { (entry as { done: boolean }).done = true },
+    onFire: p => { fired.push(p.id); return true },
+  })
+  tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
+  const tick = async (): Promise<void> => {
+    clock += 1
+    for (const entry of [...todos]) {
+      if (!entry.done && entry.at <= clock) {
+        entry.done = true
+        entry.fn()
+      }
+    }
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  for (let i = 0; i < 30; i += 1) await tick()
+  assert.equal(fired.length, 1)
+  tracker.dispose()
+})
+
+test('PendingTracker.stopWhere clears one session', () => {
+  const tracker = new PendingTracker({ thresholdMs: 1000, repeatMs: 0, onFire: () => {} })
+  tracker.start({ id: 'q:1', kind: 'question', sessionId: 's1', detail: 'd' })
+  tracker.start({ id: 'a:2', kind: 'approval', sessionId: 's2', detail: 'd' })
+  tracker.stopWhere(pending => pending.sessionId === 's1')
+  assert.equal(tracker.size, 1)
+  assert.equal(tracker.list()[0]?.id, 'a:2')
+  tracker.dispose()
+})
+
+test('recoverPending seeds unclosed ask/approval pairs only', () => {
+  const events = [
+    { type: 'tool/call', time: 1000, data: { callId: 'c1', name: 'ask_user_question', arguments: JSON.stringify({ questions: [{ id: 'q', question: '继续吗？' }] }) } },
+    { type: 'tool/result', time: 2000, data: { message: { source: { kind: 'tool', callId: 'c1' } } } },
+    { type: 'tool/call', time: 3000, data: { callId: 'c2', name: 'exit_plan_mode', arguments: JSON.stringify({ plan: '# 计划' }) } },
+    { type: 'approval/asked', time: 4000, data: { id: 'a1', toolName: 'write', reason: '写文件' } },
+    { type: 'approval/decided', time: 5000, data: { id: 'a1', outcome: 'allowed-once' } },
+    { type: 'approval/asked', time: 6000, data: { id: 'a2', toolName: 'bash' } },
+  ]
+  const seeds = recoverPending(events, 's1')
+  assert.deepEqual(seeds.map(seed => seed.id), ['q:c2', 'a:a2'])
+  assert.equal(seeds[0]?.startedAt, 3000)
+  assert.equal(seeds[0]?.kind, 'plan-review')
+  assert.equal(seeds[1]?.startedAt, 6000)
+  assert.equal(seeds[1]?.kind, 'approval')
 })

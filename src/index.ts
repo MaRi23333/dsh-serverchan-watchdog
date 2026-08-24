@@ -28,7 +28,7 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -41,7 +41,7 @@ import { fetch as undiciFetch, ProxyAgent } from 'undici'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, truncate, type PendingInteraction, type PendingKind } from './core.ts'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, recoverPending, truncate, type PendingInteraction, type PendingKind, type SessionEventView } from './core.ts'
 
 export const name = 'serverchan-watchdog'
 
@@ -94,12 +94,13 @@ interface StateFile {
   thresholdMinutes?: number
   repeatMinutes?: number
   proxy?: string
+  webUrl?: string
 }
 
 /** Rejected settings patch; `code` maps directly to the API error. */
 class StoreError extends Error {
   constructor(
-    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes',
+    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes' | 'invalid-weburl',
     message: string,
   ) {
     super(message)
@@ -114,6 +115,7 @@ interface StorePatch {
   thresholdMinutes?: number
   repeatMinutes?: number
   proxy?: string
+  webUrl?: string
 }
 
 /** Effective runtime values: settings-store overrides merged over patch Config. */
@@ -227,6 +229,11 @@ class SettingsStore {
     return this.read().proxy ?? ''
   }
 
+  /** Stored web URL (sanitized, '' when none). */
+  get webUrl(): string {
+    return this.read().webUrl ?? ''
+  }
+
   /**
    * Apply one validated patch. Everything is validated before anything is
    * written, so a rejected field cannot leave a partially-applied store.
@@ -264,6 +271,18 @@ class SettingsStore {
         next.proxy = normalized
       }
     }
+    if (patch.webUrl !== undefined) {
+      const trimmed = patch.webUrl.trim()
+      if (trimmed === '') {
+        delete next.webUrl
+      } else {
+        const normalized = webUrlOf(trimmed)
+        if (normalized === null) {
+          throw new StoreError('invalid-weburl', '打开链接必须是 http(s):// 地址')
+        }
+        next.webUrl = normalized
+      }
+    }
     next.version = 1
     this.write(next)
   }
@@ -286,6 +305,10 @@ class SettingsStore {
       if (typeof parsed.proxy === 'string') {
         const normalized = proxyOf(parsed.proxy)
         if (normalized !== null) file.proxy = normalized
+      }
+      if (typeof parsed.webUrl === 'string') {
+        const normalized = webUrlOf(parsed.webUrl)
+        if (normalized !== null) file.webUrl = normalized
       }
       return file
     } catch {
@@ -310,7 +333,7 @@ function effectiveOf(config: Config, store: SettingsStore): EffectiveSettings {
     thresholdMinutes: store.thresholdMinutes ?? config.thresholdMinutes ?? 5,
     repeatMinutes: store.repeatMinutes ?? config.repeatMinutes ?? 0,
     title: (config.title ?? '').trim() || 'DSH 等待人工确认',
-    webUrl: (config.webUrl ?? '').trim() || 'http://127.0.0.1:3080',
+    webUrl: store.webUrl !== '' ? store.webUrl : ((config.webUrl ?? '').trim() || 'http://127.0.0.1:3080'),
     proxy: store.proxy !== '' ? store.proxy : (proxyOf(config.proxy ?? '') ?? ''),
   }
 }
@@ -353,6 +376,19 @@ function proxyOf(url: string): string | null {
   }
 }
 
+/** Normalize the "open Harness" link; http(s) only (credentials removed). */
+function webUrlOf(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    parsed.username = ''
+    parsed.password = ''
+    return parsed.href.replace(/\/$/, '')
+  } catch {
+    return null
+  }
+}
+
 function redactProxy(url: string): string {
   try {
     const parsed = new URL(url)
@@ -373,13 +409,19 @@ interface PushResult {
 }
 
 /** POST one ServerChan message (form-urlencoded; success = HTTP 200 + JSON code 0). */
-async function sendPush(url: string, proxy: string, title: string, desp: string): Promise<PushResult> {
+async function sendPush(
+  url: string,
+  proxy: string,
+  title: string,
+  desp: string,
+  fetchImpl: typeof undiciFetch = undiciFetch,
+): Promise<PushResult> {
   const body = new URLSearchParams()
   body.set('title', title)
   body.set('desp', desp)
   const dispatcher = proxy !== '' ? new ProxyAgent(proxy) : undefined
   try {
-    const response = await undiciFetch(url, {
+    const response = await fetchImpl(url, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
@@ -434,7 +476,11 @@ function pushDesp(pending: PendingInteraction, config: Config, eff: EffectiveSet
 }
 
 function isLoopback(address: string | undefined): boolean {
-  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+  if (address === undefined) return false
+  // Normalize IPv4-mapped IPv6 spellings (::ffff:127.0.0.1, ::FFFF:…) to the
+  // bare address before comparing.
+  const normalized = address.toLowerCase().replace(/^::ffff:/, '')
+  return normalized === '127.0.0.1' || normalized === '::1'
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -451,7 +497,7 @@ function guardLoopback(req: IncomingMessage, res: ServerResponse): boolean {
   return true
 }
 
-/** Loopback + JSON body + loopback/same-origin Origin (CSRF posture). */
+/** Loopback + JSON body + same-origin (Origin must match Host when present; absent Origin is allowed for CLI tooling). */
 function guardWrite(req: IncomingMessage, res: ServerResponse): boolean {
   if (!guardLoopback(req, res)) return false
   const contentType = (req.headers['content-type'] ?? '').split(';')[0]?.trim() ?? ''
@@ -460,9 +506,20 @@ function guardWrite(req: IncomingMessage, res: ServerResponse): boolean {
     return false
   }
   const origin = req.headers.origin ?? ''
-  if (origin !== '' && !/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin)) {
-    sendJson(res, 403, { ok: false, error: 'forbidden-origin' })
-    return false
+  if (origin !== '') {
+    let originHost: string
+    try {
+      originHost = new URL(origin).host.toLowerCase()
+    } catch {
+      sendJson(res, 403, { ok: false, error: 'forbidden-origin' })
+      return false
+    }
+    // Same-origin: Origin host:port must equal the request's Host header, so a
+    // local page on another port cannot drive this loopback RPC.
+    if (originHost !== (req.headers.host ?? '').toLowerCase()) {
+      sendJson(res, 403, { ok: false, error: 'forbidden-origin' })
+      return false
+    }
   }
   return true
 }
@@ -504,11 +561,11 @@ export function apply(ctx: Context, config: Config): void {
       // Re-check right before publishing: a stop() that landed while a
       // previous push (or the threshold tick) was in flight must not send a
       // stale notice for an already-answered interaction.
-      if (!tracker.has(pending.id)) return
+      if (!tracker.has(pending.id)) return true
       const credential = resolveCredential(config, store)
       if (credential === '') {
         log.warn(`pending ${pending.id} not pushed: no ServerChan credential configured`)
-        return
+        return false // retry later: the key may be configured in the meantime
       }
       const result = await pushNow(credential, pushTitle(config, pending), pushDesp(pending, config, settings()))
       if (result.ok) {
@@ -516,6 +573,7 @@ export function apply(ctx: Context, config: Config): void {
       } else {
         log.warn(`push failed for ${pending.id}: ${result.message}`)
       }
+      return result.ok
     },
   })
 
@@ -528,6 +586,25 @@ export function apply(ctx: Context, config: Config): void {
     questionQueues.clear()
   }, 'serverchan-watchdog: teardown')
 
+  // A restart loses the in-memory timers: re-arm the watch from the current
+  // logs of already-attached sessions (unclosed ask/result or asked/decided
+  // pairs are asks still waiting).
+  const sessions = ctx.get('sessions')
+  if (sessions !== undefined && (settings().enabled) && settings().thresholdMinutes > 0) {
+    for (const session of sessions.list()) {
+      for (const seed of recoverPending(session.events as unknown as readonly SessionEventView[], session.id)) {
+        tracker.start(seed)
+      }
+    }
+  }
+
+  // A session that vanishes (hard dispose) must not be pushed to forever:
+  // clear its pending entries and queue.
+  ctx.on('session/disposed', (session: Session) => {
+    tracker.stopWhere(pending => pending.sessionId === session.id)
+    questionQueues.delete(session.id)
+  })
+
   const boot = settings()
   if (boot.enabled && boot.thresholdMinutes > 0) {
     ctx.on('session/event', (session: Session, event: SessionEvent) => {
@@ -535,15 +612,16 @@ export function apply(ctx: Context, config: Config): void {
         const callId = event.data.callId
         if (event.data.name === 'ask_user_question') {
           const described = describeQuestionCall(event.data.arguments)
-          if (described === null) return
           const queue = questionQueues.get(session.id)
           if (queue === undefined) questionQueues.set(session.id, [callId])
           else queue.push(callId)
           tracker.start({
             id: `q:${callId}`,
-            kind: described.kind,
+            kind: described?.kind ?? 'question',
             sessionId: session.id,
-            detail: described.detail,
+            // A payload we cannot parse still has to be watched, or a pending
+            // ask would silently go unreminded.
+            detail: described?.detail ?? '问答（请打开界面查看）',
           })
           return
         }
@@ -656,6 +734,7 @@ export function apply(ctx: Context, config: Config): void {
         if (typeof record['thresholdMinutes'] === 'number') patch.thresholdMinutes = record['thresholdMinutes']
         if (typeof record['repeatMinutes'] === 'number') patch.repeatMinutes = record['repeatMinutes']
         if (typeof record['proxy'] === 'string') patch.proxy = record['proxy']
+        if (typeof record['webUrl'] === 'string') patch.webUrl = record['webUrl']
         if (Object.keys(patch).length === 0) {
           sendJson(res, 400, { ok: false, error: 'nothing-to-save' })
           return
@@ -695,3 +774,7 @@ export function apply(ctx: Context, config: Config): void {
     }), 'serverchan-watchdog: test route')
   })
 }
+
+// Test surface: the store, guards, and the pusher are unit-tested directly.
+export { StoreError, SettingsStore, guardLoopback, guardWrite, sendPush }
+export type { StorePatch, PushResult }

@@ -29,8 +29,16 @@ export interface TrackerOptions {
   thresholdMs: number | (() => number)
   /** Delay between repeats while still pending; 0 = push once only. A function is re-read per fire. */
   repeatMs: number | (() => number)
-  /** Called when the threshold (or a repeat interval) elapses while still pending. */
-  onFire: (pending: PendingInteraction) => Promise<void> | void
+  /** Delay before retrying after a FAILED fire while still pending (default 5 minutes). */
+  retryMs?: number | (() => number)
+  /**
+   * Called when the threshold (or a repeat/retry interval) elapses while still
+   * pending. Return `false` (or throw) to schedule a retry after
+   * {@link TrackerOptions.retryMs}; retries continue until delivery succeeds or
+   * the interaction is stopped, so a transient failure cannot silently burn the
+   * only reminder.
+   */
+  onFire: (pending: PendingInteraction) => boolean | void | Promise<boolean | void>
   now?: () => number
   after?: (ms: number, fn: () => void) => unknown
   cancel?: (handle: unknown) => void
@@ -53,6 +61,7 @@ export class PendingTracker {
   private readonly cancel: (handle: unknown) => void
   private readonly thresholdMs: () => number
   private readonly repeatMs: () => number
+  private readonly retryMs: () => number
   private readonly onFire: TrackerOptions['onFire']
 
   constructor(options: TrackerOptions) {
@@ -61,8 +70,10 @@ export class PendingTracker {
     this.cancel = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
     const threshold = options.thresholdMs
     const repeat = options.repeatMs
+    const retry = options.retryMs ?? (() => 5 * 60_000)
     this.thresholdMs = typeof threshold === 'function' ? threshold : () => threshold
     this.repeatMs = typeof repeat === 'function' ? repeat : () => repeat
+    this.retryMs = typeof retry === 'function' ? retry : () => retry
     this.onFire = options.onFire
   }
 
@@ -109,6 +120,17 @@ export class PendingTracker {
     return [...this.entries.values()].map(entry => ({ ...entry.pending }))
   }
 
+  /**
+   * Stop every interaction matching a predicate (e.g. all of one session).
+   * @param match - predicate over the pending entry.
+   */
+  stopWhere(match: (pending: PendingInteraction) => boolean): void {
+    for (const id of [...this.entries.keys()]) {
+      const entry = this.entries.get(id)
+      if (entry !== undefined && match(entry.pending)) this.stop(id)
+    }
+  }
+
   /** Stop every watched interaction (plugin teardown). */
   dispose(): void {
     for (const id of [...this.entries.keys()]) this.stop(id)
@@ -119,12 +141,16 @@ export class PendingTracker {
     if (entry === undefined) return
     pending.pushes += 1
     entry.repeat = undefined
+    let failed = false
     try {
-      await this.onFire(pending)
+      failed = await this.onFire(pending) === false
     } catch {
-      // Contained: a throwing pusher must not kill the next repeat.
+      failed = true
     }
-    if (this.repeatMs() > 0 && this.entries.get(pending.id) === entry) {
+    if (this.entries.get(pending.id) !== entry) return
+    if (failed && this.retryMs() > 0) {
+      entry.repeat = this.after(this.retryMs(), () => { void this.fire(pending) })
+    } else if (this.repeatMs() > 0) {
       entry.repeat = this.after(this.repeatMs(), () => { void this.fire(pending) })
     }
   }
@@ -231,4 +257,95 @@ export function describeExitPlanCall(rawArguments: string): string {
   }
   const snippet = truncate(plan, 120)
   return snippet === '' ? '计划审查（无计划文本）' : `计划审查：${snippet}`
+}
+
+/** Minimal view of one session-log event, enough to fold pending pairs. */
+export interface SessionEventView {
+  type: string
+  data: Record<string, unknown>
+  time?: number
+}
+
+/** One interaction to re-watch. */
+export interface PendingSeed {
+  id: string
+  kind: PendingKind
+  sessionId: string
+  detail: string
+  startedAt: number
+}
+
+/**
+ * Fold a session log and recover interactions still awaiting a human answer —
+ * used at plugin startup so a `dsh web` restart does not silently drop the
+ * watch on asks that were already pending (the timers are in-memory).
+ *
+ * Includes:
+ *  - `tool/call` of `ask_user_question` / `exit_plan_mode` without a matching
+ *    `tool/result` (paired by `message.source.callId`);
+ *  - `approval/asked` without a matching `approval/decided` (paired by id).
+ *
+ * An unanswered ask is by definition not yet answered, so an unclosed pair
+ * here is the ask still waiting — with one caveat: if the host died between
+ * the human answering and the result being appended, this re-arms a watch on
+ * an already-answered ask (harmless: no answer can be expected, the reminder
+ * fires and the next session pass closes the pair).
+ *
+ * @param events - the session's events in log order.
+ * @param sessionId - session identity for the seeds.
+ * @returns seeds to start, in log order.
+ */
+export function recoverPending(
+  events: readonly SessionEventView[],
+  sessionId: string,
+): PendingSeed[] {
+  const seeds: PendingSeed[] = []
+  const seenQuestions = new Set<string>()
+  const seenApprovals = new Set<string>()
+  for (const event of events) {
+    const data = event.data
+    if (event.type === 'tool/call') {
+      const name = data['name']
+      if (name !== 'ask_user_question' && name !== 'exit_plan_mode') continue
+      const callId = data['callId']
+      if (typeof callId !== 'string') continue
+      if (seenQuestions.has(callId)) continue
+      seeds.push({
+        id: `q:${callId}`,
+        kind: name === 'exit_plan_mode' ? 'plan-review' : 'question',
+        sessionId,
+        detail: name === 'exit_plan_mode'
+          ? describeExitPlanCall(typeof data['arguments'] === 'string' ? data['arguments'] : '')
+          : (describeQuestionCall(typeof data['arguments'] === 'string' ? data['arguments'] : '')?.detail
+            ?? '问答（请打开界面查看）'),
+        startedAt: event.time ?? Date.now(),
+      })
+    } else if (event.type === 'tool/result') {
+      const message = data['message'] as { source?: { kind?: string; callId?: string } } | undefined
+      const callId = message?.source?.kind === 'tool' ? message.source.callId : undefined
+      if (callId === undefined) continue
+      seenQuestions.add(callId)
+    } else if (event.type === 'approval/asked') {
+      const id = data['id']
+      if (typeof id !== 'string') continue
+      if (seenApprovals.has(id)) continue
+      seeds.push({
+        id: `a:${id}`,
+        kind: 'approval',
+        sessionId,
+        detail: typeof data['reason'] === 'string'
+          ? data['reason']
+          : `工具 ${String(data['toolName'] ?? '?')} 请求审批`,
+        startedAt: event.time ?? Date.now(),
+      })
+    } else if (event.type === 'approval/decided') {
+      const id = data['id']
+      if (typeof id === 'string') seenApprovals.add(id)
+    }
+  }
+  // Fold again, dropping every seed whose pair closed later than its opening
+  // (a result/decided may appear after the call in a crash-tail or replay).
+  return seeds.filter(seed => (
+    seed.kind === 'approval' ? !seenApprovals.has(seed.id.slice(2)) : !seenQuestions.has(seed.id.slice(2))
+  ))
 }

@@ -1,6 +1,6 @@
 # dsh-serverchan-watchdog
 
-**[中文](./README.md) | English**
+[中文](./README.md) | **English**
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that
 pushes a **WeChat message via [ServerChan](https://sct.ftqq.com/)** when a human
@@ -20,7 +20,13 @@ stream), so it keeps working with the browser closed and you away from the desk.
   - tool approval / sandbox escalation (`approval/asked` → `approval/decided`
     pairing; coexists with reviewers such as `dsh-smart-approval` — fast
     auto-approvals never trigger a push)
-- One push per interaction by default (`repeatMinutes > 0` enables re-reminders)
+- One push per interaction by default (`repeatMinutes > 0` enables re-reminders);
+  **failed pushes are retried every 5 minutes** until delivery or the answer
+  arrives — a network hiccup or a yet-unconfigured credential cannot burn the
+  only reminder
+- **Restart recovery**: on boot the plugin re-arms the watch from the session
+  logs (unclosed ask/result and asked/decided pairs), so a `dsh web` restart
+  while you are away does not silently drop the reminder
 - Push body: kind (Q&A / plan review / approval), session id, question text or
   approval reason, elapsed time, and a link back to the Harness GUI
 - SendKey **encrypted with AES-256-GCM** under a per-machine key file
@@ -64,8 +70,13 @@ After the restart: DSH settings → Plugins → **WeChat alerts (ServerChan)**:
 - **Threshold (minutes)**: default 5; **Repeat interval (minutes)**: default 0
   (single reminder)
 - **HTTP proxy (optional)**: e.g. `http://127.0.0.1:7897`
+- **Harness link**: the address used in the push body (default
+  `http://127.0.0.1:3080`; a phone opening 127.0.0.1 reaches itself — use a LAN
+  address and reach dsh web from LAN if you need mobile access)
 - **Send test push**: one-click configuration check
-- The page also shows the live list of pending interactions
+- The page also shows the live pending list (refreshed every 10 seconds);
+  threshold changes apply to waits that start **after** the save — everything
+  else takes effect immediately
 
 ### 2. Command-line credential save (fallback)
 
@@ -96,7 +107,7 @@ the defaults (used when the page has not overridden them):
 | --- | --- | --- |
 | `/serverchan-watchdog/status` | GET | effective config summary + pending list (no credentials) |
 | `/serverchan-watchdog/config` | GET | editable settings view (no credentials) |
-| `/serverchan-watchdog/config` | POST | `{"sendkey?","clearKey?","thresholdMinutes?","repeatMinutes?","proxy?"}` (JSON + loopback Origin) |
+| `/serverchan-watchdog/config` | POST | `{"sendkey?","clearKey?","thresholdMinutes?","repeatMinutes?","proxy?","webUrl?"}` (JSON + loopback Origin) |
 | `/serverchan-watchdog/test` | POST | send one test push with the current settings |
 
 ## How it works (summary)
@@ -107,13 +118,17 @@ the defaults (used when the page has not overridden them):
    matching `tool/result` (paired by `source.callId`) or `approval/decided`
    stops it without pushing.
 3. Past `thresholdMinutes` the push goes out, carrying the question/plan
-   snippet, session id, elapsed minutes, and a Harness link.
+   snippet, session id, elapsed minutes, and a Harness link. Open it back at
+   your desk to answer (on the phone the link is only an "alarm" entry point).
 
 ## Known limitations
 
-- Timers live in memory: after a `dsh web` restart, interactions still waiting
-  are not re-reminded (they still end normally when answered later).
-- Only interactions that begin after the plugin loads are watched.
+- **Restart recovery**: after a `dsh web` restart the plugin re-arms unclosed
+  pairs from the session logs; if the host died between the human answering and
+  the log write, an already-answered ask may get one extra reminder (harmless —
+  the pair closes at the next session boundary).
+- Only interactions that begin after the plugin loads are watched (restart
+  recovery covers asks already pending before the restart).
 - With `dsh-smart-approval`, approvals auto-approved by the reviewer emit
   `approval/decided` within seconds and never trigger a push; only genuinely
   pending interactions are reminded.
@@ -124,12 +139,21 @@ the defaults (used when the page has not overridden them):
 - The push re-checks that the interaction is still pending right before
   sending (no stale notice right after an answer), but an already-issued HTTP
   request cannot be cancelled.
+- The `/test` and write routes are loopback-only by design: any local process
+  (including local web pages/scripts) can trigger a test push or change
+  settings — do not use this plugin on a machine running untrusted local code.
+- On a phone the push is an "alarm" only: the body links to the Harness
+  address you configured (default `127.0.0.1`, i.e. the machine itself) —
+  answering still requires the machine running dsh.
 
 ## Development
 
 ```sh
-pnpm install
-pnpm test                 # core unit tests (tsx + node:test)
+pnpm install                 # must complete: the client type packages
+                             # (@deepseek-ai/dsh-client-*, react, …) are
+                             # devDependencies — typecheck cannot resolve
+                             # src/client/* without them
+pnpm test                    # core + host unit tests (tsx + node:test)
 pnpm run typecheck && pnpm run build
 ```
 

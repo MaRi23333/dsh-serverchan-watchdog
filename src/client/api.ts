@@ -71,6 +71,7 @@ export interface WatchdogPatch {
   thresholdMinutes?: number
   repeatMinutes?: number
   proxy?: string
+  webUrl?: string
 }
 
 export async function saveConfig(patch: WatchdogPatch): Promise<WatchdogConfigView> {

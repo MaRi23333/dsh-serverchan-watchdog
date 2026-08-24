@@ -29,6 +29,7 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
   const [threshold, setThreshold] = useState('5')
   const [repeat, setRepeat] = useState('0')
   const [proxy, setProxy] = useState('')
+  const [webUrl, setWebUrl] = useState('')
   const [keyStatus, setKeyStatus] = useState<'unknown' | 'ok' | 'missing'>('unknown')
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<number | null>(null)
@@ -45,12 +46,24 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
       setThreshold(String(result.thresholdMinutes ?? 5))
       setRepeat(String(result.repeatMinutes ?? 0))
       setProxy(result.proxy ?? '')
+      setWebUrl(result.webUrl ?? '')
       setKeyStatus(result.credentialConfigured ? 'ok' : 'missing')
     })
-    void status().then((result) => {
-      if (alive.current && result.ok) setPending(Array.isArray(result.pending) ? result.pending : [])
-    })
-  }, [config, status])
+  }, [config])
+
+  // Live pending list: short poll so the section reflects new/dismissed asks
+  // instead of a snapshot from page load.
+  useEffect(() => {
+    let timer: number | undefined
+    const refresh = (): void => {
+      void status().then((result) => {
+        if (alive.current && result.ok) setPending(Array.isArray(result.pending) ? result.pending : [])
+      })
+    }
+    refresh()
+    timer = window.setInterval(refresh, 10_000)
+    return () => { if (timer !== undefined) window.clearInterval(timer) }
+  }, [status])
 
   const onSave = (): void => {
     if (saving) return
@@ -67,7 +80,10 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
     if (Number.isFinite(repeatValue) && repeat.trim() !== '') {
       patch.repeatMinutes = Math.round(repeatValue)
     }
-    if (proxy !== '') patch.proxy = proxy
+    // Always submitted: an empty string is how the host clears the field, so
+    // the user can genuinely wipe a saved proxy / web URL.
+    patch.proxy = proxy
+    patch.webUrl = webUrl
     void saveConfig(patch).then((result) => {
       if (!alive.current) return
       setSaving(false)
@@ -77,6 +93,7 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
         setThreshold(String(result.thresholdMinutes ?? 5))
         setRepeat(String(result.repeatMinutes ?? 0))
         setProxy(result.proxy ?? '')
+        setWebUrl(result.webUrl ?? '')
         setKeyStatus(result.credentialConfigured ? 'ok' : 'missing')
       } else {
         setSaveError(result.error ?? result.message ?? t('settings.saveFailed'))
@@ -160,6 +177,7 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
             </button>
           )}
         </div>
+        <span style={{ ...hintStyle, marginLeft: '108px' }}>{t('settings.credential.hint')}</span>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
@@ -208,6 +226,20 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
           />
         </div>
         <span style={{ ...hintStyle, marginLeft: '108px' }}>{t('settings.proxy.hint')}</span>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+        <div style={rowStyle}>
+          <span style={labelStyle}>{t('settings.webUrl')}</span>
+          <input
+            value={webUrl}
+            onChange={event => setWebUrl(event.target.value)}
+            placeholder="http://127.0.0.1:3080"
+            aria-label={t('settings.webUrl')}
+            style={inputStyle}
+          />
+        </div>
+        <span style={{ ...hintStyle, marginLeft: '108px' }}>{t('settings.webUrl.hint')}</span>
       </div>
 
       <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginLeft: '108px' }}>

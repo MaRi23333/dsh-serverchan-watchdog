@@ -20,6 +20,8 @@ export type WatchdogKey =
   | 'settings.repeat.hint'
   | 'settings.proxy'
   | 'settings.proxy.hint'
+  | 'settings.webUrl'
+  | 'settings.webUrl.hint'
   | 'settings.save'
   | 'settings.saved'
   | 'settings.saveFailed'
@@ -52,8 +54,10 @@ export const zh: Record<WatchdogKey, string> = {
   'settings.repeat.hint': '仍无人回复时每隔多久再推一次；0 = 只提醒一次',
   'settings.proxy': '网络代理（可选）',
   'settings.proxy.hint': '如 http://127.0.0.1:7890，留空为直连；不支持带用户名密码的代理地址',
+  'settings.webUrl': '打开 Harness 的链接',
+  'settings.webUrl.hint': '推送正文里的跳转链接，如 http://127.0.0.1:3080（本机）；手机打开 127.0.0.1 是手机自己——如需手机可访问，请填写局域网地址并从 LAN 访问 dsh web',
   'settings.save': '保存设置',
-  'settings.saved': '已保存，立即生效',
+  'settings.saved': '已保存；阈值对新等待生效，其余立即生效',
   'settings.saveFailed': '保存失败',
   'settings.test': '发送测试推送',
   'settings.test.sending': '正在发送…',
@@ -79,8 +83,10 @@ export const en: Record<WatchdogKey, string> = {
   'settings.repeat.hint': 'Re-push every N minutes while still pending; 0 = once only',
   'settings.proxy': 'HTTP proxy (optional)',
   'settings.proxy.hint': 'e.g. http://127.0.0.1:7890, empty for direct; proxy URLs with username/password are not supported',
+  'settings.webUrl': 'Harness link',
+  'settings.webUrl.hint': 'Link in the push body, e.g. http://127.0.0.1:3080 (local machine). A phone opening 127.0.0.1 reaches itself — use a LAN address and reach dsh web from LAN if you need mobile access.',
   'settings.save': 'Save settings',
-  'settings.saved': 'Saved, effective immediately',
+  'settings.saved': 'Saved; threshold applies to new waits, everything else takes effect immediately',
   'settings.saveFailed': 'Save failed',
   'settings.test': 'Send test push',
   'settings.test.sending': 'Sending…',

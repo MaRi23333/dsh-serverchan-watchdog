@@ -61,7 +61,7 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/core.test.ts"
+    "test": "tsx --test tests/core.test.ts tests/host.test.ts"
   },
   "license": "MIT",
   "dependencies": {
