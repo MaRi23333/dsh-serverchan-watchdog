@@ -31,6 +31,7 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
   const [proxy, setProxy] = useState('')
   const [webUrl, setWebUrl] = useState('')
   const [keyStatus, setKeyStatus] = useState<'unknown' | 'ok' | 'missing'>('unknown')
+  const [hasStoredKey, setHasStoredKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -48,6 +49,7 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
       setProxy(result.proxy ?? '')
       setWebUrl(result.webUrl ?? '')
       setKeyStatus(result.credentialConfigured ? 'ok' : 'missing')
+      setHasStoredKey(result.hasStoredKey === true)
     })
   }, [config])
 
@@ -95,6 +97,7 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
         setProxy(result.proxy ?? '')
         setWebUrl(result.webUrl ?? '')
         setKeyStatus(result.credentialConfigured ? 'ok' : 'missing')
+        setHasStoredKey(result.hasStoredKey === true)
       } else {
         setSaveError(result.error ?? result.message ?? t('settings.saveFailed'))
       }
@@ -103,7 +106,10 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
 
   const onClearKey = (): void => {
     void saveConfig({ clearKey: true }).then((result) => {
-      if (alive.current && result.ok) setKeyStatus('missing')
+      if (alive.current && result.ok) {
+        setKeyStatus(result.credentialConfigured ? 'ok' : 'missing')
+        setHasStoredKey(result.hasStoredKey === true)
+      }
     })
   }
 
@@ -167,7 +173,7 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
           }}>
             {keyStatus === 'ok' ? t('settings.credential.ok') : keyStatus === 'missing' ? t('settings.credential.missing') : ''}
           </span>
-          {keyStatus === 'ok' && (
+          {keyStatus === 'ok' && hasStoredKey && (
             <button
               type="button"
               onClick={onClearKey}

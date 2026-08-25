@@ -61,7 +61,7 @@ export const zh: Record<WatchdogKey, string> = {
   'settings.saveFailed': '保存失败',
   'settings.test': '发送测试推送',
   'settings.test.sending': '正在发送…',
-  'settings.test.ok': '测试消息已发送，请查看微信',
+  'settings.test.ok': '测试消息已发送，请查看对应推送渠道',
   'settings.test.fail': '测试推送失败',
   'settings.pending': '当前等待中的交互',
   'settings.pending.empty': '暂无等待中的人工确认',
@@ -69,8 +69,8 @@ export const zh: Record<WatchdogKey, string> = {
 }
 
 export const en: Record<WatchdogKey, string> = {
-  'settings.label': 'WeChat alerts (ServerChan)',
-  'settings.title': 'Pending human-interaction WeChat alerts (ServerChan)',
+  'settings.label': 'ServerChan mobile alerts',
+  'settings.title': 'Mobile alerts for pending human interactions (ServerChan)',
   'settings.credential': 'Push URL / SendKey',
   'settings.credential.hint': 'ServerChan SendKey (SCT… or sctp…) or full push URL from the console; stored encrypted on this machine, never echoed back',
   'settings.credential.placeholder': 'Saved (leave empty to keep)',
@@ -90,7 +90,7 @@ export const en: Record<WatchdogKey, string> = {
   'settings.saveFailed': 'Save failed',
   'settings.test': 'Send test push',
   'settings.test.sending': 'Sending…',
-  'settings.test.ok': 'Test message sent; check WeChat',
+  'settings.test.ok': 'Test message sent; check the configured channel',
   'settings.test.fail': 'Test push failed',
   'settings.pending': 'Pending interactions',
   'settings.pending.empty': 'No pending human confirmation right now',

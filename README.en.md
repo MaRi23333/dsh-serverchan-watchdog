@@ -1,162 +1,133 @@
 # dsh-serverchan-watchdog
 
-[中文](./README.md) | **English**
+[中文](./README.md) · **English**
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin
-(中文名：**Server酱推送小助手**) that
-pushes a **WeChat message via [ServerChan](https://sct.ftqq.com/)** when a human
-confirmation — approval, plan review, or an `ask_user_question` answer — stays
-**unanswered past the threshold (default 5 minutes)**.
+![dsh-serverchan-watchdog: mobile ServerChan alerts for pending DSH interactions](./assets/readme/hero.svg)
 
-Built for the "I keep missing approval prompts because I'm away from the
-computer" scenario: detection runs **on the DSH host** (over the session-event
-stream), so it keeps working with the browser closed and you away from the desk.
+[![CI](https://github.com/MaRi23333/dsh-serverchan-watchdog/actions/workflows/ci.yml/badge.svg)](https://github.com/MaRi23333/dsh-serverchan-watchdog/actions/workflows/ci.yml)
+![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-43853d)
+![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-plugin-4d6bfe)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+![Unofficial](https://img.shields.io/badge/status-unofficial-lightgrey)
 
-## Features
+When an approval, plan review, or `ask_user_question` response remains pending past the configured threshold, this plugin sends a mobile alert through ServerChan from the DeepSeek Harness (DSH) host—even with the browser closed.
 
-- Watches all three native human-interaction seams; delays the push until the
-  ask has been unanswered past `thresholdMinutes` (default **5**):
-  - `ask_user_question` Q&A (`tool/call` → `tool/result` pairing)
-  - `exit_plan_mode` plan review (plan-mode's approval review, same pairing)
-  - tool approval / sandbox escalation (`approval/asked` → `approval/decided`
-    pairing; coexists with reviewers such as `dsh-smart-approval` — fast
-    auto-approvals never trigger a push)
-- One push per interaction by default (`repeatMinutes > 0` enables re-reminders);
-  **failed pushes are retried every 5 minutes** until delivery or the answer
-  arrives — a network hiccup or a yet-unconfigured credential cannot burn the
-  only reminder
-- **Restart recovery**: on boot the plugin re-arms the watch from the session
-  logs (unclosed ask/result and asked/decided pairs), so a `dsh web` restart
-  while you are away does not silently drop the reminder
-- Push body: kind (Q&A / plan review / approval), session id, question text or
-  approval reason, elapsed time, and a link back to the Harness GUI
-- SendKey **encrypted with AES-256-GCM** under a per-machine key file
-  (`$DSH_HOME/serverchan-watchdog/state.json` + `key.bin`, ACL-tightened);
-  never in the repo, logs, or API responses
-- Full push URLs are limited to ServerChan's official hosts over https only;
-  malformed keys (e.g. uppercase `SCTP…`) are rejected at save time instead of
-  silently hitting the wrong endpoint
-- Push failures log only the failure class (HTTP status / server code /
-  timeout / network-failed) — raw errors (which may embed the URL and thus
-  the key) are never echoed
-- Optional HTTP(S) proxy (no credentials in the URL); loopback-only
-  status/config/test routes with CSRF protection
+> `dsh-serverchan-watchdog` is an independently developed community plugin. It is not affiliated with, sponsored by, or endorsed by ServerChan or DeepSeek Harness; their names are used only to identify compatible services.
 
-> Note: `@ltao0829/dsh-task-notify` already provides **browser-side** toasts /
-> desktop notifications / sounds — but those stop with the browser tab. This
-> plugin adds the **WeChat push** channel for when you're away; both can run
-> side by side.
+## What it solves
+
+Browser notifications are useful while you are at the computer. This plugin keeps the timer on the host and reaches your phone after you leave the desk or close the tab. Both types of notification can be used together.
+
+- **Host-side monitoring** over the durable session event stream; no browser connection required.
+- **Three native interaction seams**: questions, plan reviews, and tool/sandbox approvals.
+- **Restart recovery** from unclosed session-log pairs while preserving their original start time.
+- **Bounded failure handling**: network errors, timeouts, and HTTP 5xx responses get at most two retries; HTTP 4xx (including 429), ServerChan business errors, and malformed responses stop immediately.
+- **Encrypted local storage**: the SendKey is stored as AES-256-GCM ciphertext and never returned by the API or written to logs.
+
+## Watched interactions
+
+| Interaction | Starts at | Ends at |
+| --- | --- | --- |
+| `ask_user_question` | its `tool/call` | matching `tool/result` by `callId` |
+| `exit_plan_mode` plan review | its `tool/call` | matching `tool/result` by `callId` |
+| Tool or sandbox approval | `approval/asked` | matching `approval/decided` by ID |
+
+The default threshold is five minutes and one successful alert per interaction. An optional repeat interval enables later reminders. A missing credential only defers the local check: it makes no network request and consumes no retry attempt.
 
 ## Install
 
-```sh
-# from git (repository URL finalized at release)
-dsh plugin --profile web add git+https://github.com/<your-name>/dsh-serverchan-watchdog.git
+Pin the reviewed annotated `v0.1.0` for a reproducible install:
 
-# or from a local path during development
-dsh plugin --profile web add <absolute path of this repo>
+```sh
+dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog#v0.1.0
+
+# when dsh is not on PATH
+npx -p @deepseek-ai/dsh dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog#v0.1.0
 ```
 
-Restart `dsh web` from a **normal terminal** (not from inside a dsh web session).
+Use the unpinned form only when you intentionally want a rolling install that follows `main`:
+
+```sh
+dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog
+```
+
+For local development:
+
+```sh
+dsh plugin --profile web add /absolute/path/to/dsh-serverchan-watchdog
+```
+
+Restart `dsh web` from a normal terminal after installation.
 
 ## Configuration
 
-### 1. Settings page (recommended)
+Open DSH settings → Plugins → **ServerChan alerts** after the restart.
 
-After the restart: DSH settings → Plugins → **WeChat alerts (ServerChan)** (设置页标题：Server酱推送小助手):
+- **Push URL / SendKey** accepts a classic `SCT...` key, a ServerChan³ `sctp...` key, or the official complete HTTPS URL shown in the console.
+  - `SCT...` is ServerChan Turbo and commonly delivers through WeChat.
+  - `sctp...` is ServerChan³ and delivers through the ServerChan³ app.
+- **Threshold** defaults to five minutes. Changes apply to interactions that start after the save.
+- **Repeat interval** defaults to zero: one successful alert only.
+- **HTTP proxy** is optional; credentials embedded in the proxy URL are rejected.
+- **Harness link** defaults to `http://127.0.0.1:3080`. On a phone, `127.0.0.1` points to the phone itself. Use a protected LAN/VPN address if mobile access is required.
+- **Test push** sends one message with the current settings.
 
-- **Push URL / SendKey**: the SendKey from the ServerChan console (classic
-  `SCT...` or Server酱³ `sctp...`) or the full push URL; stored encrypted
-  (AES-256-GCM) in `$DSH_HOME/serverchan-watchdog/state.json`, never echoed back
-- **Threshold (minutes)**: default 5; **Repeat interval (minutes)**: default 0
-  (single reminder)
-- **HTTP proxy (optional)**: e.g. `http://127.0.0.1:7897`
-- **Harness link**: the address used in the push body (default
-  `http://127.0.0.1:3080`; a phone opening 127.0.0.1 reaches itself — use a LAN
-  address and reach dsh web from LAN if you need mobile access)
-- **Send test push**: one-click configuration check
-- The page also shows the live pending list (refreshed every 10 seconds);
-  threshold changes apply to waits that start **after** the save — everything
-  else takes effect immediately
-
-### 2. Command-line credential save (fallback)
-
-```powershell
-Invoke-WebRequest -Method Post -Uri http://127.0.0.1:3080/serverchan-watchdog/config `
-  -ContentType 'application/json' -Body '{"sendkey":"SCTyourKey"}'
-```
-
-### 3. Bundle-patch defaults
-
-Values saved in the settings page take precedence; the bundle patch provides
-the defaults (used when the page has not overridden them):
+Settings-page values override the bundle-patch defaults:
 
 ```yaml
 - id: serverchan-watchdog
   config:
-    thresholdMinutes: 5      # push after 5 unanswered minutes (default)
-    repeatMinutes: 30        # re-push every 30 minutes; 0 = once only (default)
-    title: DSH 等待人工确认   # push title (single line, ≤32 chars)
-    webUrl: http://127.0.0.1:3080   # "open Harness" link in the push body
-    proxy: http://127.0.0.1:7897    # optional proxy (leave empty for direct)
-    enabled: true            # master switch
+    enabled: true
+    thresholdMinutes: 5
+    repeatMinutes: 0
+    title: DSH 等待人工确认
+    webUrl: http://127.0.0.1:3080
+    proxy: ''
 ```
 
-## Routes (loopback only)
+`DSH_SERVERCHAN_SENDKEY` can provide the credential in environments that already have external secret management. Never write its real value to the repository or command output.
+
+## Data flow and security
+
+The following fields leave the machine in a ServerChan message: interaction type, session ID, question/plan/approval summary, elapsed time, and the configured Harness link. They are then subject to the retention policy of the selected ServerChan channel and account. Do not put secrets in pending prompts or links.
+
+- The SendKey ciphertext lives in `$DSH_HOME/serverchan-watchdog/state.json`; `key.bin` in the same directory decrypts it. File permissions are tightened where possible, but a local account that can read both files can recover the key. This is not an OS credential vault.
+- Only exact official ServerChan HTTPS endpoint shapes are accepted. Userinfo, query strings, fragments, wrong hosts or paths, and mismatched ServerChan³ UIDs are rejected.
+- Status, configuration, and test routes are loopback-only, but local processes remain inside the trust boundary. An untrusted local process can read pending details, change settings, or trigger a test message. Do not expose DSH directly to the public internet; protect reverse-proxy, LAN, and VPN access with authentication and access controls.
+- Failure logs retain only a class such as `timeout`, `network-failed`, an HTTP status, or a business-error category—never the SendKey, complete URL, response body, or raw exception.
+- Quotas, failed-call accounting, and retention differ by channel and plan. See the official [SendKey guide](https://sct.ftqq.com/docs/getting-started/sendkey/) and [FAQ](https://sct.ftqq.com/docs/getting-started/faq/).
+
+## Local routes
 
 | Route | Method | Purpose |
 | --- | --- | --- |
-| `/serverchan-watchdog/status` | GET | effective config summary + pending list (no credentials) |
-| `/serverchan-watchdog/config` | GET | editable settings view (no credentials) |
-| `/serverchan-watchdog/config` | POST | `{"sendkey?","clearKey?","thresholdMinutes?","repeatMinutes?","proxy?","webUrl?"}` (JSON + loopback Origin) |
-| `/serverchan-watchdog/test` | POST | send one test push with the current settings |
+| `/serverchan-watchdog/status` | GET | effective configuration and pending list, without credentials or state-directory paths |
+| `/serverchan-watchdog/config` | GET | editable configuration view without credentials |
+| `/serverchan-watchdog/config` | POST | save SendKey, timing, proxy, or link settings |
+| `/serverchan-watchdog/test` | POST | send one test alert |
 
-## How it works (summary)
+Write routes require JSON and loopback same-origin validation.
 
-1. The plugin listens to the host-side `session/event` stream — independent of
-   the UI, running even with no browser connected.
-2. A `tool/call` of `ask_user_question` / `exit_plan_mode` starts a timer; the
-   matching `tool/result` (paired by `source.callId`) or `approval/decided`
-   stops it without pushing.
-3. Past `thresholdMinutes` the push goes out, carrying the question/plan
-   snippet, session id, elapsed minutes, and a Harness link. Open it back at
-   your desk to answer (on the phone the link is only an "alarm" entry point).
+## Limitations
 
-## Known limitations
-
-- **Restart recovery**: after a `dsh web` restart the plugin re-arms unclosed
-  pairs from the session logs; if the host died between the human answering and
-  the log write, an already-answered ask may get one extra reminder (harmless —
-  the pair closes at the next session boundary).
-- Only interactions that begin after the plugin loads are watched (restart
-  recovery covers asks already pending before the restart).
-- With `dsh-smart-approval`, approvals auto-approved by the reviewer emit
-  `approval/decided` within seconds and never trigger a push; only genuinely
-  pending interactions are reminded.
-- Encryption is "readable by anyone who can read the plugin state dir":
-  `key.bin` lives beside the ciphertext in `$DSH_HOME/serverchan-watchdog/`,
-  ACL-tightened to the current user; an account that can read that directory
-  can recover the SendKey (local AES-key scheme, not the OS credential store).
-- The push re-checks that the interaction is still pending right before
-  sending (no stale notice right after an answer), but an already-issued HTTP
-  request cannot be cancelled.
-- The `/test` and write routes are loopback-only by design: any local process
-  (including local web pages/scripts) can trigger a test push or change
-  settings — do not use this plugin on a machine running untrusted local code.
-- On a phone the push is an "alarm" only: the body links to the Harness
-  address you configured (default `127.0.0.1`, i.e. the machine itself) —
-  answering still requires the machine running dsh.
+- If the host crashes after a human answers but before the result reaches the session log, restart recovery may send one extra reminder.
+- The plugin checks that an interaction is still pending immediately before each push, but it cannot cancel an HTTP request already in flight.
+- A phone alert is only an entry point. Opening Harness on the phone depends on the configured URL and your network access controls.
 
 ## Development
 
 ```sh
-pnpm install                 # must complete: the client type packages
-                             # (@deepseek-ai/dsh-client-*, react, …) are
-                             # devDependencies — typecheck cannot resolve
-                             # src/client/* without them
-pnpm test                    # core + host unit tests (tsx + node:test)
-pnpm run typecheck && pnpm run build
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm test
+pnpm run build
+pnpm run check:smoke
+pnpm run check:pack
+git diff --exit-code -- lib
 ```
 
-CI (`.github/workflows/ci.yml`): Node 22/24 matrix running typecheck + unit
-tests + build, and verifies the committed `lib/` artifacts match.
+CI runs equivalent gates on Node.js 22 and 24. `autoInstallPeers:false` is intentional: a clean consumer must not rely on pnpm filling undeclared runtime dependencies.
+
+## License
+
+[MIT](./LICENSE)

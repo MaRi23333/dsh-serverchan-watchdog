@@ -1,7 +1,7 @@
 {
   "name": "dsh-serverchan-watchdog",
   "version": "0.1.0",
-  "description": "ServerChan (Server酱) WeChat watchdog for DeepSeek Harness: push a message when an approval / plan review / ask_user_question stays unanswered past a threshold (default 5 minutes).",
+  "description": "Unofficial ServerChan watchdog for DeepSeek Harness: send a mobile notification when an approval, plan review, or question remains unanswered.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -21,11 +21,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/<your-name>/dsh-serverchan-watchdog.git"
+    "url": "git+https://github.com/MaRi23333/dsh-serverchan-watchdog.git"
   },
-  "homepage": "https://github.com/<your-name>/dsh-serverchan-watchdog#readme",
+  "homepage": "https://github.com/MaRi23333/dsh-serverchan-watchdog#readme",
   "bugs": {
-    "url": "https://github.com/<your-name>/dsh-serverchan-watchdog/issues"
+    "url": "https://github.com/MaRi23333/dsh-serverchan-watchdog/issues"
   },
   "exports": {
     ".": {
@@ -38,10 +38,12 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
+    "lib/index.js",
+    "lib/client.js",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "assets/readme/hero.svg",
     "LICENSE"
   ],
   "dsh": {
@@ -61,15 +63,17 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/core.test.ts tests/host.test.ts"
+    "test": "tsx --test tests/core.test.ts tests/host.test.ts",
+    "check:smoke": "node scripts/smoke.mjs",
+    "check:pack": "node scripts/check-pack.mjs"
   },
   "license": "MIT",
   "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
     "undici": "^7.0.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "^3.0.0"
+    "@deepseek-ai/cordis": "^4.0.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -80,7 +84,7 @@
     "@deepseek-ai/dsh-host-webserver": "0.1.1-rc.2",
     "@deepseek-ai/dsh-session": "0.1.1-rc.2",
     "@deepseek-ai/dsh-user-approval": "0.1.1-rc.2",
-    "@deepseek-ai/schemastery": "^3.0.0",
+    "@deepseek-ai/schemastery": "3.18.1",
     "@types/node": "^26.2.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",

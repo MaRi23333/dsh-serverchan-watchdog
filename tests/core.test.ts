@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import './env-isolation.ts'
 import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, recoverPending } from '../src/core.ts'
 
 test('buildPushUrl: classic SendKey', () => {
@@ -17,6 +18,12 @@ test('buildPushUrl: full URL passes through', () => {
   )
 })
 
+test('buildPushUrl: accepts documented key characters and normalizes an optional URL slash', () => {
+  assert.equal(buildPushUrl('SCTa_b-c'), 'https://sctapi.ftqq.com/SCTa_b-c.send')
+  assert.equal(buildPushUrl('sctp123tA_b-c'), 'https://123.push.ft07.com/send/sctp123tA_b-c.send')
+  assert.equal(buildPushUrl('https://sctapi.ftqq.com/SCTa_b-c.send/'), 'https://sctapi.ftqq.com/SCTa_b-c.send')
+})
+
 test('buildPushUrl: malformed credentials are rejected', () => {
   assert.equal(buildPushUrl('sctp-no-uid'), null)
   assert.equal(buildPushUrl(''), null)
@@ -25,6 +32,7 @@ test('buildPushUrl: malformed credentials are rejected', () => {
 
 test('buildPushUrl: uppercase SCTP is rejected, not misrouted to the classic endpoint', () => {
   assert.equal(buildPushUrl('SCTP123tAb'), null)
+  assert.equal(buildPushUrl('https://sctapi.ftqq.com/SCTP123tAb.send'), null)
 })
 
 test('buildPushUrl: full URL limited to official ServerChan hosts (https only)', () => {
@@ -35,6 +43,15 @@ test('buildPushUrl: full URL limited to official ServerChan hosts (https only)',
   )
   assert.equal(buildPushUrl('http://127.0.0.1:8080/send'), null)
   assert.equal(buildPushUrl('https://evil.example.com/x'), null)
+})
+
+test('buildPushUrl: rejects URL credentials, query/hash, malformed paths, and mismatched SC3 uid', () => {
+  assert.equal(buildPushUrl('https://u:p@sctapi.ftqq.com/SCTa.send'), null)
+  assert.equal(buildPushUrl('https://sctapi.ftqq.com/SCTa.send?x=1'), null)
+  assert.equal(buildPushUrl('https://sctapi.ftqq.com/SCTa.send#fragment'), null)
+  assert.equal(buildPushUrl('https://sctapi.ftqq.com/not-a-send'), null)
+  assert.equal(buildPushUrl('https://42.push.ft07.com/send/sctp43tX.send'), null)
+  assert.equal(buildPushUrl('not-a-sendkey'), null)
 })
 
 test('describeQuestionCall parses a question payload', () => {
@@ -234,6 +251,148 @@ test('PendingTracker retries after a failed fire and stops after success', async
   }
   for (let i = 0; i < 40; i += 1) await tick()
   assert.equal(fired.length, 2)
+  tracker.dispose()
+})
+
+test('PendingTracker bounds retryable failures to the initial attempt plus two retries', async () => {
+  let clock = 0
+  const todos: Array<{ at: number; fn: () => void; done: boolean }> = []
+  const attempts: number[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: 1,
+    repeatMs: 0,
+    retryMs: 1,
+    now: () => clock,
+    after: (ms, fn) => { const entry = { at: clock + ms, fn, done: false }; todos.push(entry); return entry },
+    cancel: entry => { (entry as { done: boolean }).done = true },
+    onFire: pending => { attempts.push(pending.pushes); return 'retryable-failure' },
+  })
+  tracker.start({ id: 'q:bounded', kind: 'question', sessionId: 's', detail: 'd' })
+  for (let i = 0; i < 10; i += 1) {
+    clock += 1
+    for (const entry of [...todos]) if (!entry.done && entry.at <= clock) { entry.done = true; entry.fn() }
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(attempts, [1, 1, 1])
+  assert.equal(tracker.has('q:bounded'), false)
+  tracker.dispose()
+})
+
+test('PendingTracker stops immediately after a terminal failure', async () => {
+  const scheduled: Array<() => void> = []
+  const tracker = new PendingTracker({
+    thresholdMs: 1,
+    repeatMs: 10,
+    retryMs: 10,
+    after: (_ms, fn) => { scheduled.push(fn); return fn },
+    cancel: () => {},
+    onFire: () => 'terminal-failure',
+  })
+  tracker.start({ id: 'q:terminal', kind: 'question', sessionId: 's', detail: 'd' })
+  scheduled[0]?.()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(tracker.has('q:terminal'), false)
+  assert.equal(scheduled.length, 1)
+})
+
+test('PendingTracker never re-arms after stop while a fire is in flight', async () => {
+  for (const settle of ['resolve', 'reject'] as const) {
+    const scheduled: Array<() => void> = []
+    let resolveFire!: (value: 'retryable-failure') => void
+    let rejectFire!: (reason: Error) => void
+    const inFlight = new Promise<'retryable-failure'>((resolve, reject) => {
+      resolveFire = resolve
+      rejectFire = reject
+    })
+    const tracker = new PendingTracker({
+      thresholdMs: 1,
+      repeatMs: 10,
+      retryMs: 10,
+      after: (_ms, fn) => { scheduled.push(fn); return fn },
+      cancel: () => {},
+      onFire: () => inFlight,
+    })
+    tracker.start({ id: `q:${settle}`, kind: 'question', sessionId: 's', detail: 'd' })
+    scheduled[0]?.()
+    await new Promise(resolve => setImmediate(resolve))
+    tracker.stop(`q:${settle}`)
+    if (settle === 'resolve') resolveFire('retryable-failure')
+    else rejectFire(new Error('boom'))
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(tracker.has(`q:${settle}`), false)
+    assert.equal(scheduled.length, 1)
+  }
+})
+
+test('PendingTracker numbers successful repeated deliveries monotonically', async () => {
+  const scheduled: Array<() => void> = []
+  const seen: number[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: 1,
+    repeatMs: 1,
+    after: (_ms, fn) => { scheduled.push(fn); return fn },
+    cancel: () => {},
+    onFire: pending => { seen.push(pending.pushes); return 'delivered' },
+  })
+  tracker.start({ id: 'q:repeat-number', kind: 'question', sessionId: 's', detail: 'd' })
+  scheduled[0]?.()
+  await new Promise(resolve => setImmediate(resolve))
+  scheduled[1]?.()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(seen, [1, 2])
+  tracker.dispose()
+})
+
+test('PendingTracker does not spend retry budget while deferred and commits pushes only on delivery', async () => {
+  let clock = 0
+  const todos: Array<{ at: number; fn: () => void; done: boolean }> = []
+  const seen: number[] = []
+  let calls = 0
+  const tracker = new PendingTracker({
+    thresholdMs: 1,
+    repeatMs: 0,
+    retryMs: 1,
+    now: () => clock,
+    after: (ms, fn) => { const entry = { at: clock + ms, fn, done: false }; todos.push(entry); return entry },
+    cancel: entry => { (entry as { done: boolean }).done = true },
+    onFire: pending => {
+      seen.push(pending.pushes)
+      calls += 1
+      return calls < 3 ? 'deferred' : 'delivered'
+    },
+  })
+  tracker.start({ id: 'q:defer', kind: 'question', sessionId: 's', detail: 'd' })
+  for (let i = 0; i < 6; i += 1) {
+    clock += 1
+    for (const entry of [...todos]) if (!entry.done && entry.at <= clock) { entry.done = true; entry.fn() }
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.deepEqual(seen, [1, 1, 1])
+  assert.equal(tracker.list()[0]?.pushes, 1)
+  tracker.dispose()
+})
+
+test('PendingTracker restores a recovered interaction with remaining threshold', async () => {
+  let clock = 10_000
+  const delays: number[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: 5_000,
+    repeatMs: 0,
+    now: () => clock,
+    after: (ms, fn) => { delays.push(ms); return { ms, fn } },
+    cancel: () => {},
+    onFire: () => 'delivered',
+  })
+  tracker.start({ id: 'q:recovered', kind: 'question', sessionId: 's', detail: 'd', startedAt: 8_000 })
+  assert.deepEqual(delays, [3_000])
+  tracker.dispose()
+})
+
+test('PendingTracker bounds detail exposed by status snapshots', () => {
+  const tracker = new PendingTracker({ thresholdMs: 1000, repeatMs: 0, onFire: () => 'delivered' })
+  tracker.start({ id: 'q:long', kind: 'question', sessionId: 's', detail: 'x'.repeat(5000) })
+  assert.equal(tracker.list()[0]?.detail.length, 500)
+  assert.ok(tracker.list()[0]?.detail.endsWith('…'))
   tracker.dispose()
 })
 

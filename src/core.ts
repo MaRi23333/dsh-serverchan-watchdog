@@ -23,22 +23,24 @@ export interface PendingInteraction {
   pushes: number
 }
 
+/** Outcome of one reminder attempt. */
+export type FireOutcome = 'delivered' | 'deferred' | 'retryable-failure' | 'terminal-failure'
+
 /** Injected timing seam (tests use fake clocks; production uses real timers). */
 export interface TrackerOptions {
   /** Delay from start to the first fire. A function is re-read per start, so a settings change applies to interactions watched from then on. */
   thresholdMs: number | (() => number)
   /** Delay between repeats while still pending; 0 = push once only. A function is re-read per fire. */
   repeatMs: number | (() => number)
-  /** Delay before retrying after a FAILED fire while still pending (default 5 minutes). */
+  /** Delay before retrying after a retryable fire while still pending (default 5 minutes). */
   retryMs?: number | (() => number)
   /**
    * Called when the threshold (or a repeat/retry interval) elapses while still
-   * pending. Return `false` (or throw) to schedule a retry after
-   * {@link TrackerOptions.retryMs}; retries continue until delivery succeeds or
-   * the interaction is stopped, so a transient failure cannot silently burn the
-   * only reminder.
+   * pending. `deferred` does not consume the bounded retry budget; a
+   * `retryable-failure` consumes one of at most two retries; terminal failures
+   * stop tracking. The legacy boolean return is accepted for compatibility.
    */
-  onFire: (pending: PendingInteraction) => boolean | void | Promise<boolean | void>
+  onFire: (pending: PendingInteraction) => FireOutcome | boolean | void | Promise<FireOutcome | boolean | void>
   now?: () => number
   after?: (ms: number, fn: () => void) => unknown
   cancel?: (handle: unknown) => void
@@ -48,6 +50,7 @@ interface Entry {
   pending: PendingInteraction
   timer: unknown
   repeat: unknown
+  retries: number
 }
 
 /**
@@ -86,11 +89,15 @@ export class PendingTracker {
    * Begin watching one interaction. A repeat start for the same id is a no-op.
    * @param entry - identity, kind, session, and display text; startedAt/pushes are filled here.
    */
-  start(entry: Omit<PendingInteraction, 'startedAt' | 'pushes'>): void {
+  start(entry: Omit<PendingInteraction, 'startedAt' | 'pushes'> & Partial<Pick<PendingInteraction, 'startedAt'>>): void {
     if (this.entries.has(entry.id)) return
-    const pending: PendingInteraction = { ...entry, startedAt: this.now(), pushes: 0 }
-    const timer = this.after(this.thresholdMs(), () => { void this.fire(pending) })
-    this.entries.set(entry.id, { pending, timer, repeat: undefined })
+    const now = this.now()
+    const startedAt = entry.startedAt ?? now
+    const pending: PendingInteraction = { ...entry, detail: truncate(entry.detail, 500), startedAt, pushes: 0 }
+    const elapsed = Math.max(0, now - startedAt)
+    const delay = Math.max(0, this.thresholdMs() - elapsed)
+    const timer = this.after(delay, () => { void this.fire(pending) })
+    this.entries.set(entry.id, { pending, timer, repeat: undefined, retries: 0 })
   }
 
   /**
@@ -139,20 +146,44 @@ export class PendingTracker {
   private async fire(pending: PendingInteraction): Promise<void> {
     const entry = this.entries.get(pending.id)
     if (entry === undefined) return
-    pending.pushes += 1
     entry.repeat = undefined
-    let failed = false
+    let outcome: FireOutcome = 'delivered'
     try {
-      failed = await this.onFire(pending) === false
+      // Give the callback an immutable-looking attempt snapshot so titles,
+      // bodies and logs can describe this delivery as #1/#2 before the
+      // committed successful-delivery counter is updated below.
+      const attempt = { ...pending, pushes: pending.pushes + 1 }
+      const result = await this.onFire(attempt)
+      if (result === false) outcome = 'retryable-failure'
+      else if (result === true || result === undefined) outcome = 'delivered'
+      else outcome = typeof result === 'string' ? result : 'delivered'
     } catch {
-      failed = true
+      outcome = 'retryable-failure'
     }
     if (this.entries.get(pending.id) !== entry) return
-    if (failed && this.retryMs() > 0) {
-      entry.repeat = this.after(this.retryMs(), () => { void this.fire(pending) })
-    } else if (this.repeatMs() > 0) {
-      entry.repeat = this.after(this.repeatMs(), () => { void this.fire(pending) })
+    if (outcome === 'delivered') {
+      pending.pushes += 1
+      entry.retries = 0
+      if (this.repeatMs() > 0) {
+        entry.repeat = this.after(this.repeatMs(), () => { void this.fire(pending) })
+      }
+      return
     }
+    if (outcome === 'deferred') {
+      if (this.retryMs() > 0) entry.repeat = this.after(this.retryMs(), () => { void this.fire(pending) })
+      return
+    }
+    if (outcome === 'retryable-failure') {
+      if (entry.retries < 2 && this.retryMs() > 0) {
+        entry.retries += 1
+        entry.repeat = this.after(this.retryMs(), () => { void this.fire(pending) })
+      } else {
+        this.entries.delete(pending.id)
+      }
+      return
+    }
+    // A terminal upstream response must not cause another quota-consuming call.
+    this.entries.delete(pending.id)
   }
 }
 
@@ -182,25 +213,34 @@ export function buildPushUrl(credential: string): string | null {
   const value = credential.trim()
   if (value === '') return null
   if (/^https:\/\//i.test(value)) {
-    let host: string
+    let parsed: URL
     try {
-      host = new URL(value).host
+      parsed = new URL(value)
     } catch {
       return null
     }
-    if (host === 'sctapi.ftqq.com' || /^\d+\.push\.ft07\.com$/.test(host)) return value
+    if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' || parsed.port !== '' || parsed.search !== '' || parsed.hash !== '') return null
+    const classic = /^\/(SCT[A-Za-z0-9_-]+)\.send\/?$/.exec(parsed.pathname)
+    if (parsed.hostname === 'sctapi.ftqq.com' && classic !== null && !/^SCTP/i.test(classic[1])) {
+      return `https://sctapi.ftqq.com/${classic[1]}.send`
+    }
+    const sc3 = /^\/send\/(sctp(\d+)t[A-Za-z0-9_-]+)\.send\/?$/.exec(parsed.pathname)
+    if (sc3 !== null && parsed.hostname === `${sc3[2]}.push.ft07.com`) {
+      return `https://${sc3[2]}.push.ft07.com/send/${sc3[1]}.send`
+    }
     return null
   }
   // Any other URL-shaped credential (http://, ftp://, …) is rejected up front
   // instead of being misused as a classic SendKey.
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return null
   if (value.startsWith('sctp')) {
-    const match = /^sctp(\d+)t/.exec(value)
+    const match = /^sctp(\d+)t[A-Za-z0-9_-]+$/.exec(value)
     return match === null ? null : `https://${match[1]}.push.ft07.com/send/${value}.send`
   }
   // "SCTP..." (uppercase) is not a valid Server酱³ key; misrouting it to the
   // classic endpoint would fail with a confusing 403, so reject it up front.
   if (/^sctp/i.test(value)) return null
+  if (!/^SCT[A-Za-z0-9_-]+$/.test(value)) return null
   return `https://sctapi.ftqq.com/${value}.send`
 }
 

@@ -47,3 +47,9 @@ jobs:
 
       - name: lib/ must match committed artifacts
         run: git diff --exit-code -- lib
+
+      - name: Host + client smoke
+        run: pnpm run check:smoke
+
+      - name: Package whitelist
+        run: pnpm run check:pack

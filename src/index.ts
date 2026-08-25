@@ -2,7 +2,7 @@
  * dsh-serverchan-watchdog — host half.
  *
  * Watches the live session-event stream for the two human-interaction seams
- * and pushes a ServerChan (Server酱) WeChat message when one stays unanswered
+ * and pushes a mobile alert through ServerChan when one stays unanswered
  * past a configurable threshold (default 5 minutes):
  *
  *   - `tool/call` of `ask_user_question` → `tool/result`    (问答)
@@ -40,8 +40,8 @@ import { fetch as undiciFetch, ProxyAgent } from 'undici'
 // event members, and the session/event signature into this build.
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-user-approval'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, recoverPending, truncate, type PendingInteraction, type PendingKind, type SessionEventView } from './core.ts'
+import type {} from '@deepseek-ai/dsh-session'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, recoverPending, truncate, type FireOutcome, type PendingInteraction, type PendingKind, type SessionEventView } from './core.ts'
 
 export const name = 'serverchan-watchdog'
 
@@ -60,8 +60,6 @@ export interface Config {
   proxy?: string
   /** Plugin state dir; defaults to $DSH_HOME/serverchan-watchdog. */
   stateDir?: string
-  /** SendKey or full push URL fallback (prefer the encrypted file / env). */
-  sendkey?: string
 }
 
 export const Config: s<Config> = s.object({
@@ -72,7 +70,6 @@ export const Config: s<Config> = s.object({
   webUrl: s.string().default('http://127.0.0.1:3080'),
   proxy: s.string().default(''),
   stateDir: s.string().default(''),
-  sendkey: s.string().default(''),
 })
 
 const KIND_LABELS: Record<PendingKind, string> = {
@@ -348,7 +345,6 @@ function editableView(config: Config, store: SettingsStore): {
   proxy: string
   credentialConfigured: boolean
   hasStoredKey: boolean
-  stateDir: string
 } {
   const eff = effectiveOf(config, store)
   return {
@@ -360,7 +356,6 @@ function editableView(config: Config, store: SettingsStore): {
     proxy: redactProxy(eff.proxy),
     credentialConfigured: resolveCredential(config, store) !== '',
     hasStoredKey: store.hasStoredKey,
-    stateDir: stateDirOf(config),
   }
 }
 
@@ -370,7 +365,8 @@ function proxyOf(url: string): string | null {
     const parsed = new URL(url)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
     if (parsed.username !== '' || parsed.password !== '') return null
-    return parsed.href.replace(/\/$/, '')
+    if (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') return null
+    return `${parsed.protocol}//${parsed.host}`
   } catch {
     return null
   }
@@ -406,6 +402,7 @@ function redactProxy(url: string): string {
 interface PushResult {
   ok: boolean
   message: string
+  outcome: Exclude<FireOutcome, 'deferred'>
 }
 
 /** POST one ServerChan message (form-urlencoded; success = HTTP 200 + JSON code 0). */
@@ -419,31 +416,38 @@ async function sendPush(
   const body = new URLSearchParams()
   body.set('title', title)
   body.set('desp', desp)
-  const dispatcher = proxy !== '' ? new ProxyAgent(proxy) : undefined
+  let dispatcher: ProxyAgent | undefined
   try {
+    dispatcher = proxy !== '' ? new ProxyAgent(proxy) : undefined
     const response = await fetchImpl(url, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
       signal: AbortSignal.timeout(20_000),
+      redirect: 'manual',
       ...(dispatcher === undefined ? {} : { dispatcher }),
     })
     const text = await response.text()
-    if (response.status !== 200) return { ok: false, message: `HTTP ${response.status}` }
+    if (response.status !== 200) {
+      const outcome = response.status >= 500 && response.status <= 599 ? 'retryable-failure' : 'terminal-failure'
+      return { ok: false, message: `HTTP ${response.status}`, outcome }
+    }
     let code: unknown
     try {
       code = (JSON.parse(text) as { code?: unknown }).code
     } catch {
-      return { ok: false, message: 'unexpected response body' }
+      return { ok: false, message: 'unexpected response body', outcome: 'terminal-failure' }
     }
-    if (code !== 0) return { ok: false, message: `server code ${String(code)}` }
-    return { ok: true, message: 'pushed' }
+    if (code !== 0) return { ok: false, message: 'server code indicates failure', outcome: 'terminal-failure' }
+    return { ok: true, message: 'pushed', outcome: 'delivered' }
   } catch (error) {
     // Never echo raw error text: undici/node may include the request URL
     // (and thus the SendKey) in the message, so responses and logs stay
     // class-only.
-    const detail = error instanceof Error && error.name === 'AbortError' ? 'timeout' : 'network-failed'
-    return { ok: false, message: detail }
+    const detail = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+      ? 'timeout'
+      : 'network-failed'
+    return { ok: false, message: detail, outcome: 'retryable-failure' }
   } finally {
     if (dispatcher !== undefined) void dispatcher.close()
   }
@@ -452,8 +456,6 @@ async function sendPush(
 function resolveCredential(config: Config, store: SettingsStore): string {
   const fromFile = store.sendkey
   if (fromFile !== '') return fromFile
-  const fromConfig = (config.sendkey ?? '').trim()
-  if (fromConfig !== '') return fromConfig
   return (process.env.DSH_SERVERCHAN_SENDKEY ?? '').trim()
 }
 
@@ -485,12 +487,29 @@ function isLoopback(address: string | undefined): boolean {
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload)
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
   res.end(body)
 }
 
+function requestHost(req: IncomingMessage): string | null {
+  const raw = req.headers.host
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  try {
+    const parsed = new URL(`http://${raw}`)
+    const hostname = parsed.hostname.toLowerCase()
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '[::1]') return null
+    return parsed.host.toLowerCase()
+  } catch {
+    return null
+  }
+}
+
 function guardLoopback(req: IncomingMessage, res: ServerResponse): boolean {
-  if (!isLoopback(req.socket.remoteAddress)) {
+  if (!isLoopback(req.socket.remoteAddress) || requestHost(req) === null) {
     sendJson(res, 403, { ok: false, error: 'forbidden' })
     return false
   }
@@ -500,6 +519,8 @@ function guardLoopback(req: IncomingMessage, res: ServerResponse): boolean {
 /** Loopback + JSON body + same-origin (Origin must match Host when present; absent Origin is allowed for CLI tooling). */
 function guardWrite(req: IncomingMessage, res: ServerResponse): boolean {
   if (!guardLoopback(req, res)) return false
+  const host = requestHost(req)
+  if (host === null) return false
   const contentType = (req.headers['content-type'] ?? '').split(';')[0]?.trim() ?? ''
   if (contentType !== 'application/json') {
     sendJson(res, 415, { ok: false, error: 'content-type must be application/json' })
@@ -509,14 +530,18 @@ function guardWrite(req: IncomingMessage, res: ServerResponse): boolean {
   if (origin !== '') {
     let originHost: string
     try {
-      originHost = new URL(origin).host.toLowerCase()
+      const parsed = new URL(origin)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('bad protocol')
+      const hostname = parsed.hostname.toLowerCase()
+      if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '[::1]') throw new Error('bad host')
+      originHost = parsed.host.toLowerCase()
     } catch {
       sendJson(res, 403, { ok: false, error: 'forbidden-origin' })
       return false
     }
     // Same-origin: Origin host:port must equal the request's Host header, so a
     // local page on another port cannot drive this loopback RPC.
-    if (originHost !== (req.headers.host ?? '').toLowerCase()) {
+    if (originHost !== host) {
       sendJson(res, 403, { ok: false, error: 'forbidden-origin' })
       return false
     }
@@ -550,7 +575,7 @@ export function apply(ctx: Context, config: Config): void {
 
   const pushNow = async (credential: string, title: string, desp: string): Promise<PushResult> => {
     const url = buildPushUrl(credential)
-    if (url === null) return { ok: false, message: 'SendKey/URL 无效或未配置' }
+    if (url === null) return { ok: false, message: 'SendKey/URL 无效或未配置', outcome: 'terminal-failure' }
     return sendPush(url, settings().proxy, title, desp)
   }
 
@@ -561,11 +586,11 @@ export function apply(ctx: Context, config: Config): void {
       // Re-check right before publishing: a stop() that landed while a
       // previous push (or the threshold tick) was in flight must not send a
       // stale notice for an already-answered interaction.
-      if (!tracker.has(pending.id)) return true
+      if (!tracker.has(pending.id)) return 'terminal-failure'
       const credential = resolveCredential(config, store)
       if (credential === '') {
         log.warn(`pending ${pending.id} not pushed: no ServerChan credential configured`)
-        return false // retry later: the key may be configured in the meantime
+        return 'deferred' // no network call; the key may be configured in the meantime
       }
       const result = await pushNow(credential, pushTitle(config, pending), pushDesp(pending, config, settings()))
       if (result.ok) {
@@ -573,7 +598,7 @@ export function apply(ctx: Context, config: Config): void {
       } else {
         log.warn(`push failed for ${pending.id}: ${result.message}`)
       }
-      return result.ok
+      return result.outcome
     },
   })
 
@@ -594,20 +619,26 @@ export function apply(ctx: Context, config: Config): void {
     for (const session of sessions.list()) {
       for (const seed of recoverPending(session.events as unknown as readonly SessionEventView[], session.id)) {
         tracker.start(seed)
+        if (seed.kind === 'question' || seed.kind === 'plan-review') {
+          const callId = seed.id.slice(2)
+          const queue = questionQueues.get(session.id)
+          if (queue === undefined) questionQueues.set(session.id, [callId])
+          else if (!queue.includes(callId)) queue.push(callId)
+        }
       }
     }
   }
 
   // A session that vanishes (hard dispose) must not be pushed to forever:
   // clear its pending entries and queue.
-  ctx.on('session/disposed', (session: Session) => {
+  ctx.on('session/disposed', (session) => {
     tracker.stopWhere(pending => pending.sessionId === session.id)
     questionQueues.delete(session.id)
   })
 
   const boot = settings()
   if (boot.enabled && boot.thresholdMinutes > 0) {
-    ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    ctx.on('session/event', (session, event) => {
       if (event.type === 'tool/call') {
         const callId = event.data.callId
         if (event.data.name === 'ask_user_question') {
@@ -745,12 +776,12 @@ export function apply(ctx: Context, config: Config): void {
           if (error instanceof StoreError) {
             sendJson(res, 400, { ok: false, error: error.code, message: error.message })
           } else {
-            log.warn(`config save failed: ${error instanceof Error ? error.message : String(error)}`)
+            log.warn('config save failed')
             sendJson(res, 500, { ok: false, error: 'save-failed' })
           }
           return
         }
-        log.info('settings saved (sendkey encrypted)')
+        log.info('settings saved')
         sendJson(res, 200, { ok: true, ...editableView(config, store) })
       },
     }), 'serverchan-watchdog: config route')

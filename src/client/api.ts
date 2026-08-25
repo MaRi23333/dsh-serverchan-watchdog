@@ -13,7 +13,6 @@ export interface WatchdogConfigView {
   proxy?: string
   credentialConfigured?: boolean
   hasStoredKey?: boolean
-  stateDir?: string
   error?: string
   message?: string
 }
