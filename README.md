@@ -63,6 +63,8 @@ dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
 
 重启后打开 DSH 设置页 → 插件 → **Server酱推送小助手**。
 
+第一次使用 Server酱：先按[官方 SendKey 指南](https://sct.ftqq.com/docs/getting-started/sendkey/)开通 [Server酱 Turbo](https://sct.ftqq.com/)（通常推送到微信）或 [Server酱³](https://sc3.ft07.com/)（推送到独立 App），再把控制台给出的 SendKey 或完整推送地址填入下方设置。
+
 - **推送地址 / SendKey**：支持经典 `SCT...`、Server酱³ `sctp...`，或控制台给出的官方完整 HTTPS 推送地址。
   - `SCT...` 对应 Server酱 Turbo，通常推送到微信。
   - `sctp...` 对应 Server酱³，推送到 Server酱³ App。
@@ -111,6 +113,7 @@ dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
 ## 已知限制
 
 - 如果主机在人工已答复但结果尚未写入会话日志的极短窗口内崩溃，重启恢复可能多提醒一次。
+- DSH 重启时，多个已经超过阈值且仍未处理的等待会同时恢复计时，可能在短时间内发送多条提醒并消耗 Server酱额度。
 - 推送前会重新确认该交互仍在等待，但无法撤销已经发出的 HTTP 请求。
 - 手机提醒只是入口；能否从手机打开 Harness 取决于你配置的地址和网络访问控制。
 

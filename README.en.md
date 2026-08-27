@@ -63,6 +63,8 @@ Restart `dsh web` from a normal terminal after installation.
 
 Open DSH settings → Plugins → **ServerChan alerts** after the restart.
 
+New to ServerChan? Follow the official [SendKey guide](https://sct.ftqq.com/docs/getting-started/sendkey/) and set up either [ServerChan Turbo](https://sct.ftqq.com/) (commonly delivered through WeChat) or [ServerChan³](https://sc3.ft07.com/) (the standalone app), then paste the console-provided SendKey or complete push URL below.
+
 - **Push URL / SendKey** accepts a classic `SCT...` key, a ServerChan³ `sctp...` key, or the official complete HTTPS URL shown in the console.
   - `SCT...` is ServerChan Turbo and commonly delivers through WeChat.
   - `sctp...` is ServerChan³ and delivers through the ServerChan³ app.
@@ -111,6 +113,7 @@ Write routes require JSON and loopback same-origin validation.
 ## Limitations
 
 - If the host crashes after a human answers but before the result reaches the session log, restart recovery may send one extra reminder.
+- After a DSH restart, multiple still-pending interactions that are already past the threshold are re-armed together and may send several alerts in a short period, consuming ServerChan quota.
 - The plugin checks that an interaction is still pending immediately before each push, but it cannot cancel an HTTP request already in flight.
 - A phone alert is only an entry point. Opening Harness on the phone depends on the configured URL and your network access controls.
 
