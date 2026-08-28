@@ -5,6 +5,7 @@
 ![dsh-serverchan-watchdog: mobile ServerChan alerts for pending DSH interactions](./assets/readme/hero.svg)
 
 [![CI](https://github.com/MaRi23333/dsh-serverchan-watchdog/actions/workflows/ci.yml/badge.svg)](https://github.com/MaRi23333/dsh-serverchan-watchdog/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/dsh-serverchan-watchdog)](https://www.npmjs.com/package/dsh-serverchan-watchdog)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-43853d)
 ![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-plugin-4d6bfe)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -36,16 +37,16 @@ The default threshold is five minutes and one successful alert per interaction. 
 
 ## Install
 
-Pin the reviewed annotated `v0.1.0` for a reproducible install:
+Install the stable release from npm:
 
 ```sh
-dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog#v0.1.0
+dsh plugin --profile web add dsh-serverchan-watchdog
 
 # when dsh is not on PATH
-npx -p @deepseek-ai/dsh dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog#v0.1.0
+npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-serverchan-watchdog
 ```
 
-Use the unpinned form only when you intentionally want a rolling install that follows `main`:
+If you previously installed from GitHub, rerun the npm command above to switch channels. Use the unpinned GitHub form only when you intentionally want a rolling install that follows `main`:
 
 ```sh
 dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog
