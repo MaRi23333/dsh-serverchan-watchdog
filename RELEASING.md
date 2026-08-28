@@ -23,7 +23,8 @@ npm trust github dsh-serverchan-watchdog --repo MaRi23333/dsh-serverchan-watchdo
 ```
 
 The dry run must identify this package, `MaRi23333/dsh-serverchan-watchdog`,
-`publish.yml`, and publish permission only. The package uses no GitHub Actions
+`publish.yml`, and only the JSON `createPackage` permission produced by
+`--allow-publish`. The package uses no GitHub Actions
 environment and does not grant staged-publish permission. Run the non-dry-run
 command in the npm owner's interactive terminal and complete browser 2FA there;
 never copy an OTP, temporary auth URL, or npm token into an agent conversation.
