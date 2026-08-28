@@ -39,6 +39,12 @@ npm may require another browser 2FA flow even for `trust list`. The first
 end-to-end proof will be the next real Release-driven npm version and its
 registry provenance.
 
+The owner completed the Trusted Publisher binding from an interactive terminal
+on 2026-08-28. It targets `MaRi23333/dsh-serverchan-watchdog`, `publish.yml`, no
+GitHub Actions environment, and publish permission only. Do not treat that
+one-time setup receipt as an end-to-end release test; the next real version must
+still verify the workflow run, registry `latest`, and provenance.
+
 ## 1. Prepare and verify the version
 
 Update `package.json`, version-bearing source constants, and committed build
