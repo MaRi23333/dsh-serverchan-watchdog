@@ -1,6 +1,6 @@
 {
   "name": "dsh-serverchan-watchdog",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Unofficial ServerChan watchdog for DeepSeek Harness: send a mobile notification when an approval, plan review, or question remains unanswered.",
   "keywords": [
     "deepseek-harness",
