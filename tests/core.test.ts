@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './env-isolation.ts'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, recoverPending } from '../src/core.ts'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, readSessionLog, recoverPending } from '../src/core.ts'
 
 test('buildPushUrl: classic SendKey', () => {
   assert.equal(buildPushUrl('SCTabc'), 'https://sctapi.ftqq.com/SCTabc.send')
@@ -454,4 +454,14 @@ test('recoverPending seeds unclosed ask/approval pairs only', () => {
   assert.equal(seeds[0]?.kind, 'plan-review')
   assert.equal(seeds[1]?.startedAt, 6000)
   assert.equal(seeds[1]?.kind, 'approval')
+})
+
+test('readSessionLog prefers snapshotEvents (DSH 0.1.2+) and falls back to events', () => {
+  const log = [{ type: 'approval/asked', time: 1, data: { id: 'a1' } }]
+  assert.equal(readSessionLog({ snapshotEvents: () => log }).length, 1)
+  assert.equal(readSessionLog({ events: log }).length, 1)
+  assert.equal(readSessionLog({ snapshotEvents: () => log, events: [] }).length, 1)
+  assert.deepEqual(readSessionLog({ snapshotEvents: () => { throw new Error('boom') } }), [])
+  assert.deepEqual(readSessionLog({}), [])
+  assert.deepEqual(readSessionLog(null), [])
 })

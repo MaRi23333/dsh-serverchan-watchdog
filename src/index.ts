@@ -41,7 +41,7 @@ import { fetch as undiciFetch, ProxyAgent } from 'undici'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-session'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, recoverPending, truncate, type FireOutcome, type PendingInteraction, type PendingKind, type SessionEventView } from './core.ts'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, readSessionLog, recoverPending, truncate, type FireOutcome, type PendingInteraction, type PendingKind, type PendingSeed } from './core.ts'
 
 export const name = 'serverchan-watchdog'
 
@@ -611,21 +611,28 @@ export function apply(ctx: Context, config: Config): void {
     questionQueues.clear()
   }, 'serverchan-watchdog: teardown')
 
-  // A restart loses the in-memory timers: re-arm the watch from the current
-  // logs of already-attached sessions (unclosed ask/result or asked/decided
-  // pairs are asks still waiting).
-  const sessions = ctx.get('sessions')
-  if (sessions !== undefined && (settings().enabled) && settings().thresholdMinutes > 0) {
-    for (const session of sessions.list()) {
-      for (const seed of recoverPending(session.events as unknown as readonly SessionEventView[], session.id)) {
-        tracker.start(seed)
-        if (seed.kind === 'question' || seed.kind === 'plan-review') {
-          const callId = seed.id.slice(2)
-          const queue = questionQueues.get(session.id)
-          if (queue === undefined) questionQueues.set(session.id, [callId])
-          else if (!queue.includes(callId)) queue.push(callId)
-        }
+  const armRecovered = (sessionId: string, seed: PendingSeed): void => {
+    tracker.start(seed)
+    if (seed.kind === 'question' || seed.kind === 'plan-review') {
+      const callId = seed.id.slice(2)
+      const queue = questionQueues.get(sessionId)
+      if (queue === undefined) questionQueues.set(sessionId, [callId])
+      else if (!queue.includes(callId)) queue.push(callId)
+    }
+  }
+
+  /**
+   * Re-arm watches from a session's durable log. Needed because constructor
+   * seeds (resume / process restart) never emit `session/event`, and because
+   * DSH 0.1.2 removed `session.events` in favor of `snapshotEvents()`.
+   */
+  const recoverSession = (session: { id: string }): void => {
+    try {
+      for (const seed of recoverPending(readSessionLog(session), session.id)) {
+        armRecovered(session.id, seed)
       }
+    } catch {
+      log.warn(`recovery skipped for session ${session.id}`)
     }
   }
 
@@ -638,6 +645,16 @@ export function apply(ctx: Context, config: Config): void {
 
   const boot = settings()
   if (boot.enabled && boot.thresholdMinutes > 0) {
+    // Subscribe before folding list(): a session that attaches between the
+    // two would otherwise be missed. Constructor seeds do not emit
+    // session/event, so this is the only way to watch an ask that was
+    // already pending when dsh web (or this plugin) came up.
+    ctx.on('session/created', session => { recoverSession(session) })
+    const sessions = ctx.get('sessions')
+    if (sessions !== undefined) {
+      for (const session of sessions.list()) recoverSession(session)
+    }
+
     ctx.on('session/event', (session, event) => {
       if (event.type === 'tool/call') {
         const callId = event.data.callId
