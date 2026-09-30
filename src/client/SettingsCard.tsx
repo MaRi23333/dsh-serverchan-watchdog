@@ -82,8 +82,8 @@ export function WatchdogSettings(props: WatchdogSettingsProps): React.ReactEleme
     if (Number.isFinite(repeatValue) && repeat.trim() !== '') {
       patch.repeatMinutes = Math.round(repeatValue)
     }
-    // Always submitted: an empty string is how the host clears the field, so
-    // the user can genuinely wipe a saved proxy / web URL.
+    // Always submitted: an empty string clears the saved proxy, and for the
+    // link field it tells the host "push without a link" (persisted no-link).
     patch.proxy = proxy
     patch.webUrl = webUrl
     void saveConfig(patch).then((result) => {

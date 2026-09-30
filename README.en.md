@@ -79,7 +79,7 @@ New to ServerChan? Follow the official [SendKey guide](https://sct.ftqq.com/docs
 - **Threshold** defaults to five minutes. Changes apply to interactions that start after the save.
 - **Repeat interval** defaults to zero: one successful alert only.
 - **HTTP proxy** is optional; credentials embedded in the proxy URL are rejected.
-- **Harness link** defaults to `http://127.0.0.1:3080`. On a phone, `127.0.0.1` points to the phone itself. Use a protected LAN/VPN address if mobile access is required.
+- **Push jump link** is empty by default, so the push body carries no link. The feature stays available: `dsh://open` raises the DeepSeek Harness desktop app on click (the desktop client registers the `dsh://` protocol and reacts only to that exact URL), and an `http(s)://` value opens a browser instead — on a phone, `127.0.0.1` points to the phone itself, so use a protected LAN/VPN address for mobile access (note: the current desktop client binds its Web GUI to loopback only).
 - **Test push** sends one message with the current settings.
 
 Settings-page values override the bundle-patch defaults:
@@ -91,7 +91,7 @@ Settings-page values override the bundle-patch defaults:
     thresholdMinutes: 5
     repeatMinutes: 0
     title: DSH 等待人工确认
-    webUrl: http://127.0.0.1:3080
+    webUrl: ''
     proxy: ''
 ```
 

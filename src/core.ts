@@ -306,6 +306,28 @@ export interface SessionEventView {
   time?: number
 }
 
+/**
+ * Read a session's durable log in a way that works on both current DSH
+ * (`snapshotEvents()`, 0.1.2+) and the older `session.events` array.
+ * Constructor-seeded history is never published on `session/event`, so
+ * recovery has to read the log — this is that read.
+ * @param session - a live Session-like object, or anything else (returns []).
+ */
+export function readSessionLog(session: unknown): readonly SessionEventView[] {
+  if (session === null || typeof session !== 'object') return []
+  const candidate = session as { snapshotEvents?: unknown; events?: unknown }
+  if (typeof candidate.snapshotEvents === 'function') {
+    try {
+      const snap = (candidate.snapshotEvents as () => unknown)()
+      if (Array.isArray(snap)) return snap as SessionEventView[]
+    } catch {
+      return []
+    }
+  }
+  if (Array.isArray(candidate.events)) return candidate.events as SessionEventView[]
+  return []
+}
+
 /** One interaction to re-watch. */
 export interface PendingSeed {
   id: string

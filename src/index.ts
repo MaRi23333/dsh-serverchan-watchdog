@@ -41,7 +41,7 @@ import { fetch as undiciFetch, ProxyAgent } from 'undici'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-session'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, recoverPending, truncate, type FireOutcome, type PendingInteraction, type PendingKind, type SessionEventView } from './core.ts'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, readSessionLog, recoverPending, truncate, type FireOutcome, type PendingInteraction, type PendingKind, type PendingSeed } from './core.ts'
 
 export const name = 'serverchan-watchdog'
 
@@ -54,7 +54,11 @@ export interface Config {
   repeatMinutes?: number
   /** Push title (single line, ≤32 chars per ServerChan). */
   title?: string
-  /** Link opened from the push body. */
+  /**
+   * Link carried in the push body. '' omits the link line entirely (the
+   * default); 'dsh://' values collapse to `dsh://open`, which makes the
+   * desktop client raise its primary window.
+   */
   webUrl?: string
   /** Optional http(s) proxy for the push request (no userinfo). */
   proxy?: string
@@ -67,7 +71,7 @@ export const Config: s<Config> = s.object({
   thresholdMinutes: s.number().min(1).max(1440).default(5),
   repeatMinutes: s.number().min(0).max(1440).default(0),
   title: s.string().default('DSH 等待人工确认'),
-  webUrl: s.string().default('http://127.0.0.1:3080'),
+  webUrl: s.string().default(''),
   proxy: s.string().default(''),
   stateDir: s.string().default(''),
 })
@@ -92,6 +96,8 @@ interface StateFile {
   repeatMinutes?: number
   proxy?: string
   webUrl?: string
+  /** The settings page explicitly chose "push without a link" ('' patch). */
+  noLink?: boolean
 }
 
 /** Rejected settings patch; `code` maps directly to the API error. */
@@ -116,7 +122,7 @@ interface StorePatch {
 }
 
 /** Effective runtime values: settings-store overrides merged over patch Config. */
-interface EffectiveSettings {
+export interface EffectiveSettings {
   enabled: boolean
   thresholdMinutes: number
   repeatMinutes: number
@@ -231,6 +237,11 @@ class SettingsStore {
     return this.read().webUrl ?? ''
   }
 
+  /** True when the settings page explicitly disabled the push link. */
+  get noLink(): boolean {
+    return this.read().noLink === true
+  }
+
   /**
    * Apply one validated patch. Everything is validated before anything is
    * written, so a rejected field cannot leave a partially-applied store.
@@ -271,13 +282,17 @@ class SettingsStore {
     if (patch.webUrl !== undefined) {
       const trimmed = patch.webUrl.trim()
       if (trimmed === '') {
+        // '' on the page means "push without a link" — persisted, so it beats
+        // the bundle Config instead of falling back to it.
+        next.noLink = true
         delete next.webUrl
       } else {
         const normalized = webUrlOf(trimmed)
         if (normalized === null) {
-          throw new StoreError('invalid-weburl', '打开链接必须是 http(s):// 地址')
+          throw new StoreError('invalid-weburl', '打开链接必须是 http(s):// 或 dsh:// 地址')
         }
         next.webUrl = normalized
+        delete next.noLink
       }
     }
     next.version = 1
@@ -307,6 +322,7 @@ class SettingsStore {
         const normalized = webUrlOf(parsed.webUrl)
         if (normalized !== null) file.webUrl = normalized
       }
+      if (parsed.noLink === true) file.noLink = true
       return file
     } catch {
       return { version: 1 }
@@ -330,7 +346,9 @@ function effectiveOf(config: Config, store: SettingsStore): EffectiveSettings {
     thresholdMinutes: store.thresholdMinutes ?? config.thresholdMinutes ?? 5,
     repeatMinutes: store.repeatMinutes ?? config.repeatMinutes ?? 0,
     title: (config.title ?? '').trim() || 'DSH 等待人工确认',
-    webUrl: store.webUrl !== '' ? store.webUrl : ((config.webUrl ?? '').trim() || 'http://127.0.0.1:3080'),
+    webUrl: store.noLink
+      ? ''
+      : store.webUrl !== '' ? store.webUrl : (config.webUrl ?? '').trim(),
     proxy: store.proxy !== '' ? store.proxy : (proxyOf(config.proxy ?? '') ?? ''),
   }
 }
@@ -372,10 +390,16 @@ function proxyOf(url: string): string | null {
   }
 }
 
-/** Normalize the "open Harness" link; http(s) only (credentials removed). */
+/**
+ * Normalize the push jump link: http(s) keeps its existing treatment
+ * (credentials stripped, no trailing slash); any `dsh://` URL collapses to
+ * `dsh://open` because that exact URL is all the desktop client reacts to;
+ * every other scheme (ftp:, javascript:, file:, …) is rejected.
+ */
 function webUrlOf(url: string): string | null {
   try {
-    const parsed = new URL(url)
+    const parsed = new URL(url.trim())
+    if (parsed.protocol === 'dsh:') return 'dsh://open'
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
     parsed.username = ''
     parsed.password = ''
@@ -464,17 +488,22 @@ function pushTitle(config: Config, pending: PendingInteraction): string {
   return pending.pushes > 1 ? `${base}（第 ${pending.pushes} 次）` : base
 }
 
-function pushDesp(pending: PendingInteraction, config: Config, eff: EffectiveSettings): string {
+export function pushDesp(pending: PendingInteraction, config: Config, eff: EffectiveSettings): string {
   const elapsedMinutes = Math.max(0, Math.floor((Date.now() - pending.startedAt) / 60_000))
-  return [
+  const lines = [
     `**类型**：${KIND_LABELS[pending.kind]}`,
     `**会话**：\`${pending.sessionId}\``,
     `**内容**：${truncate(pending.detail, 300)}`,
     `**已等待**：${elapsedMinutes} 分钟（阈值 ${eff.thresholdMinutes} 分钟）`,
     `**状态**：${pending.pushes > 1 ? `已提醒 ${pending.pushes} 次，仍未处理` : '超过阈值未处理'}`,
-    '',
-    `👉 [打开 DeepSeek Harness](${eff.webUrl})`,
-  ].join('\n')
+  ]
+  if (eff.webUrl !== '') {
+    // The desktop client only reacts to dsh://open (raises its window), so the
+    // label says which Harness surface the click lands on.
+    const label = /^dsh:/i.test(eff.webUrl) ? '打开 Harness 桌面端' : '打开 Harness (Web)'
+    lines.push('', `👉 [${label}](${eff.webUrl})`)
+  }
+  return lines.join('\n')
 }
 
 function isLoopback(address: string | undefined): boolean {
@@ -611,21 +640,28 @@ export function apply(ctx: Context, config: Config): void {
     questionQueues.clear()
   }, 'serverchan-watchdog: teardown')
 
-  // A restart loses the in-memory timers: re-arm the watch from the current
-  // logs of already-attached sessions (unclosed ask/result or asked/decided
-  // pairs are asks still waiting).
-  const sessions = ctx.get('sessions')
-  if (sessions !== undefined && (settings().enabled) && settings().thresholdMinutes > 0) {
-    for (const session of sessions.list()) {
-      for (const seed of recoverPending(session.events as unknown as readonly SessionEventView[], session.id)) {
-        tracker.start(seed)
-        if (seed.kind === 'question' || seed.kind === 'plan-review') {
-          const callId = seed.id.slice(2)
-          const queue = questionQueues.get(session.id)
-          if (queue === undefined) questionQueues.set(session.id, [callId])
-          else if (!queue.includes(callId)) queue.push(callId)
-        }
+  const armRecovered = (sessionId: string, seed: PendingSeed): void => {
+    tracker.start(seed)
+    if (seed.kind === 'question' || seed.kind === 'plan-review') {
+      const callId = seed.id.slice(2)
+      const queue = questionQueues.get(sessionId)
+      if (queue === undefined) questionQueues.set(sessionId, [callId])
+      else if (!queue.includes(callId)) queue.push(callId)
+    }
+  }
+
+  /**
+   * Re-arm watches from a session's durable log. Needed because constructor
+   * seeds (resume / process restart) never emit `session/event`, and because
+   * DSH 0.1.2 removed `session.events` in favor of `snapshotEvents()`.
+   */
+  const recoverSession = (session: { id: string }): void => {
+    try {
+      for (const seed of recoverPending(readSessionLog(session), session.id)) {
+        armRecovered(session.id, seed)
       }
+    } catch {
+      log.warn(`recovery skipped for session ${session.id}`)
     }
   }
 
@@ -638,6 +674,16 @@ export function apply(ctx: Context, config: Config): void {
 
   const boot = settings()
   if (boot.enabled && boot.thresholdMinutes > 0) {
+    // Subscribe before folding list(): a session that attaches between the
+    // two would otherwise be missed. Constructor seeds do not emit
+    // session/event, so this is the only way to watch an ask that was
+    // already pending when dsh web (or this plugin) came up.
+    ctx.on('session/created', session => { recoverSession(session) })
+    const sessions = ctx.get('sessions')
+    if (sessions !== undefined) {
+      for (const session of sessions.list()) recoverSession(session)
+    }
+
     ctx.on('session/event', (session, event) => {
       if (event.type === 'tool/call') {
         const callId = event.data.callId

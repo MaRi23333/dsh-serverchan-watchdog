@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { StoreError, SettingsStore, guardLoopback, guardWrite, sendPush } from '../src/index.ts'
+import { StoreError, SettingsStore, guardLoopback, guardWrite, pushDesp, sendPush, type Config, type EffectiveSettings } from '../src/index.ts'
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'scw-test-'))
@@ -61,12 +61,70 @@ test('SettingsStore rejects invalid patches atomically', () => {
     assert.equal(store.proxy, '')
     store.update({ webUrl: 'http://192.168.1.10:3080' })
     assert.equal(store.webUrl, 'http://192.168.1.10:3080')
+    // Any dsh:// URL collapses to the one URL the desktop client reacts to.
+    store.update({ webUrl: 'dsh://open/' })
+    assert.equal(store.webUrl, 'dsh://open')
+    store.update({ webUrl: 'DSH://some/route?x=1' })
+    assert.equal(store.webUrl, 'dsh://open')
+    // Empty webUrl now persists "push without a link" instead of falling back.
     store.update({ webUrl: '' })
     assert.equal(store.webUrl, '')
+    assert.equal(store.noLink, true)
     assert.throws(() => store.update({ webUrl: 'ftp://x' }), StoreError)
+    assert.throws(() => store.update({ webUrl: 'javascript:alert(1)' }), StoreError)
+    assert.throws(() => store.update({ webUrl: 'file:///C:/Windows' }), StoreError)
+    // The accepted no-link choice survived every rejected patch.
+    assert.equal(store.noLink, true)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('webUrl: no-link choice persists, and a concrete value clears it', () => {
+  const dir = tempDir()
+  try {
+    const store = new SettingsStore(dir)
+    store.update({ webUrl: '' })
+    const again = new SettingsStore(dir)
+    assert.equal(again.webUrl, '')
+    assert.equal(again.noLink, true)
+    again.update({ webUrl: 'http://192.168.1.10:3080' })
+    const third = new SettingsStore(dir)
+    assert.equal(third.webUrl, 'http://192.168.1.10:3080')
+    assert.equal(third.noLink, false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+const despPending = {
+  id: 'q:call-1',
+  kind: 'question' as const,
+  sessionId: 'sess-1',
+  detail: '需要确认',
+  startedAt: Date.now() - 6 * 60_000,
+  pushes: 1,
+}
+
+const despEff: EffectiveSettings = {
+  enabled: true,
+  thresholdMinutes: 5,
+  repeatMinutes: 0,
+  title: 'DSH 等待人工确认',
+  webUrl: '',
+  proxy: '',
+}
+
+const despConfig: Config = {}
+
+test('pushDesp labels the link by scheme and omits it when no link is set', () => {
+  const desktop = pushDesp(despPending, despConfig, { ...despEff, webUrl: 'dsh://open' })
+  assert.ok(desktop.includes('[打开 Harness 桌面端](dsh://open)'))
+  const web = pushDesp(despPending, despConfig, { ...despEff, webUrl: 'http://192.168.1.10:3080' })
+  assert.ok(web.includes('[打开 Harness (Web)](http://192.168.1.10:3080)'))
+  const none = pushDesp(despPending, despConfig, { ...despEff, webUrl: '' })
+  assert.ok(!none.includes('👉'))
+  assert.ok(!none.includes('打开 Harness'))
 })
 
 function fakeReq(remoteAddress: string | undefined, headers: Record<string, string>): IncomingMessage {

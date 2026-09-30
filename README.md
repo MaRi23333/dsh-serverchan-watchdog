@@ -79,7 +79,7 @@ dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
 - **阈值**：默认 5 分钟；修改只影响之后新开始的等待。
 - **重复提醒间隔**：默认 0，即成功送达一次后不重复。
 - **网络代理**：可选 HTTP/HTTPS 代理；不接受 URL 中的用户名或密码。
-- **打开 Harness 的链接**：默认 `http://127.0.0.1:3080`。手机上的 `127.0.0.1` 指向手机自身；需要从手机访问时应使用受保护的局域网/VPN 地址。
+- **推送里的跳转链接**：默认留空，推送正文不附链接。保留可选项：填 `dsh://open` 点击会把 DeepSeek Harness 桌面客户端拉到前台（桌面端已注册 `dsh://` 协议，且只响应这一个地址）；填 `http(s)://` 地址则用浏览器打开——手机上的 `127.0.0.1` 指向手机自身，需要从手机访问时应使用受保护的局域网/VPN 地址（注意：当前桌面客户端的 Web GUI 仅绑定本机回环）。
 - **测试推送**：使用当前设置发送一条测试消息。
 
 设置页保存值优先于 bundle patch。可用的默认配置如下：
@@ -91,7 +91,7 @@ dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
     thresholdMinutes: 5
     repeatMinutes: 0
     title: DSH 等待人工确认
-    webUrl: http://127.0.0.1:3080
+    webUrl: ''
     proxy: ''
 ```
 
