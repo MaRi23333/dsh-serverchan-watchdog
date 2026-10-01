@@ -7,7 +7,7 @@
 [![CI](https://github.com/MaRi23333/dsh-serverchan-watchdog/actions/workflows/ci.yml/badge.svg)](https://github.com/MaRi23333/dsh-serverchan-watchdog/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-serverchan-watchdog)](https://www.npmjs.com/package/dsh-serverchan-watchdog)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-43853d)
-![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-plugin-4d6bfe)
+![DeepSeek Harness 0.2.0-rc.2](https://img.shields.io/badge/DeepSeek_Harness-0.2.0--rc.2-4d6bfe)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Unofficial](https://img.shields.io/badge/status-unofficial-lightgrey)
 
@@ -39,8 +39,12 @@ The default threshold is five minutes and one successful alert per interaction. 
 
 <p align="center">
   <img src="./assets/readme/settings.png" width="760" alt="ServerChan alerts settings: SendKey, threshold, repeat interval, proxy, and Harness link" /><br>
-  <em>Configure the push credential, reminder timing, optional proxy, and Harness link, then send a test alert. Every <code>127.0.0.1</code> value shown is a local loopback example; a stored SendKey is never echoed.</em>
+  <em>Configure the push credential, reminder timing, optional proxy, and Harness link, then send a test alert. Every <code>127.0.0.1</code> value shown is a local loopback example; since 0.1.5 the jump link is empty by default. A stored SendKey is never echoed.</em>
 </p>
+
+## Host and desktop compatibility
+
+This update targets DSH `0.2.0-rc.2` and the desktop client of the same version. The development team reports it working after migration, and runtime versions and bundle admission requirements have been checked. The desktop settings UI, real background alerts and notification-client handling of `dsh://` still need validation in the actual environment; load compatibility is not end-to-end acceptance.
 
 ## Install
 
@@ -79,7 +83,7 @@ New to ServerChan? Follow the official [SendKey guide](https://sct.ftqq.com/docs
 - **Threshold** defaults to five minutes. Changes apply to interactions that start after the save.
 - **Repeat interval** defaults to zero: one successful alert only.
 - **HTTP proxy** is optional; credentials embedded in the proxy URL are rejected.
-- **Push jump link** is empty by default, so the push body carries no link. The feature stays available: `dsh://open` raises the DeepSeek Harness desktop app on click (the desktop client registers the `dsh://` protocol and reacts only to that exact URL), and an `http(s)://` value opens a browser instead — on a phone, `127.0.0.1` points to the phone itself, so use a protected LAN/VPN address for mobile access (note: the current desktop client binds its Web GUI to loopback only).
+- **Push jump link** is empty by default, so the push body carries no link. Optionally, `dsh://open` brings DeepSeek Harness to the foreground when opened on a computer with the app and protocol registered; it cannot remotely wake the computer from a phone, and support in the notification client must be checked separately. An `http(s)://` value opens a browser instead — on a phone, `127.0.0.1` points to the phone itself, so use a protected LAN/VPN address for mobile access (the current desktop client binds its Web GUI to loopback only).
 - **Test push** sends one message with the current settings.
 
 Settings-page values override the bundle-patch defaults:

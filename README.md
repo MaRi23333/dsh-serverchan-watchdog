@@ -7,7 +7,7 @@
 [![CI](https://github.com/MaRi23333/dsh-serverchan-watchdog/actions/workflows/ci.yml/badge.svg)](https://github.com/MaRi23333/dsh-serverchan-watchdog/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-serverchan-watchdog)](https://www.npmjs.com/package/dsh-serverchan-watchdog)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-43853d)
-![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-plugin-4d6bfe)
+![DeepSeek Harness 0.2.0-rc.2](https://img.shields.io/badge/DeepSeek_Harness-0.2.0--rc.2-4d6bfe)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Unofficial](https://img.shields.io/badge/status-unofficial-lightgrey)
 
@@ -39,8 +39,12 @@
 
 <p align="center">
   <img src="./assets/readme/settings.png" width="760" alt="Server酱推送小助手设置页：SendKey、提醒阈值、重复间隔、代理和 Harness 链接" /><br>
-  <em>设置页：配置推送凭据、提醒节奏、可选代理和 Harness 跳转链接，并可发送测试推送。图中的 <code>127.0.0.1</code> 均为本机回环示例；已保存的 SendKey 不会回显。</em>
+  <em>设置页：配置推送凭据、提醒节奏、可选代理和 Harness 跳转链接，并可发送测试推送。图中的 <code>127.0.0.1</code> 均为本机回环示例；0.1.5 起跳转链接默认留空。已保存的 SendKey 不会回显。</em>
 </p>
+
+## 宿主与桌面端兼容
+
+本轮目标宿主为 DSH `0.2.0-rc.2` 与同版本桌面客户端。开发侧报告迁移后可用，运行时版本与 bundle 准入条件已核对；桌面设置页、真实后台提醒及通知客户端中的 `dsh://` 点击链路仍需按实际使用环境验证，不把加载兼容等同于端到端验收。
 
 ## 安装
 
@@ -79,7 +83,7 @@ dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
 - **阈值**：默认 5 分钟；修改只影响之后新开始的等待。
 - **重复提醒间隔**：默认 0，即成功送达一次后不重复。
 - **网络代理**：可选 HTTP/HTTPS 代理；不接受 URL 中的用户名或密码。
-- **推送里的跳转链接**：默认留空，推送正文不附链接。保留可选项：填 `dsh://open` 点击会把 DeepSeek Harness 桌面客户端拉到前台（桌面端已注册 `dsh://` 协议，且只响应这一个地址）；填 `http(s)://` 地址则用浏览器打开——手机上的 `127.0.0.1` 指向手机自身，需要从手机访问时应使用受保护的局域网/VPN 地址（注意：当前桌面客户端的 Web GUI 仅绑定本机回环）。
+- **推送里的跳转链接**：默认留空，推送正文不附链接。可选 `dsh://open`：在安装并注册该协议的电脑上打开时，将 DeepSeek Harness 桌面客户端拉到前台；它不能从手机远程唤起电脑，通知客户端是否允许此类链接也需自行验证。填 `http(s)://` 则用浏览器打开——手机上的 `127.0.0.1` 指向手机自身，需要手机访问时应使用受保护的局域网/VPN 地址（当前桌面客户端的 Web GUI 仅绑定本机回环）。
 - **测试推送**：使用当前设置发送一条测试消息。
 
 设置页保存值优先于 bundle patch。可用的默认配置如下：
