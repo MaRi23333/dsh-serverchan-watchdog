@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ServerChan watchdog",
+    "description": "Send a mobile alert through ServerChan when an approval, plan review, or question remains unanswered past the threshold. Monitoring runs on the DSH host."
+  }
+}

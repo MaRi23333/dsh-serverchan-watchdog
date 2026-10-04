@@ -46,6 +46,8 @@ The default threshold is five minutes and one successful alert per interaction. 
 
 This update targets DSH `0.2.0-rc.2` and the desktop client of the same version. The development team reports it working after migration, and runtime versions and bundle admission requirements have been checked. The desktop settings UI, real background alerts and notification-client handling of `dsh://` still need validation in the actual environment; load compatibility is not end-to-end acceptance.
 
+The current **0.1.6 source candidate** only adds English and Chinese names and descriptions to the plugin manager. Monitoring and push behavior are unchanged; this candidate has not been published. See [CHANGELOG.md](./CHANGELOG.md) for update notes.
+
 ## Install
 
 Install the stable release from npm:

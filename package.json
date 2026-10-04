@@ -1,6 +1,6 @@
 {
   "name": "dsh-serverchan-watchdog",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Unofficial ServerChan watchdog for DeepSeek Harness: send a mobile notification when an approval, plan review, or question remains unanswered.",
   "keywords": [
     "deepseek-harness",
@@ -37,6 +37,7 @@
       "default": "./lib/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
@@ -45,6 +46,8 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "CHANGELOG.md",
+    "locale/*.json",
     "assets/readme/hero.svg",
     "assets/readme/settings.png",
     "LICENSE"

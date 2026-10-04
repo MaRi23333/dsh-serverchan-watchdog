@@ -25,6 +25,7 @@ if (spawned.status !== 0) {
 const [result] = JSON.parse(spawned.stdout)
 const files = result.files.map(file => file.path).sort()
 const expected = [
+  'CHANGELOG.md',
   'LICENSE',
   'README.en.md',
   'README.md',
@@ -33,6 +34,8 @@ const expected = [
   'cordis.patch.yml',
   'lib/client.js',
   'lib/index.js',
+  'locale/en.json',
+  'locale/zh.json',
   'package.json',
 ].sort()
 
