@@ -97,6 +97,47 @@ test('webUrl: no-link choice persists, and a concrete value clears it', () => {
   }
 })
 
+test('SettingsStore keeps the master switch unset until the page writes it', () => {
+  const dir = tempDir()
+  try {
+    const store = new SettingsStore(dir)
+    // Unset (not false) so the bundle-patch Config still wins until the user
+    // touches the switch; `store.enabled ?? config.enabled` relies on it.
+    assert.equal(store.enabled, undefined)
+    store.update({ enabled: false })
+    const again = new SettingsStore(dir)
+    assert.equal(again.enabled, false)
+    again.update({ enabled: true })
+    const third = new SettingsStore(dir)
+    assert.equal(third.enabled, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SettingsStore bounds the push title and clears it back to the default', () => {
+  const dir = tempDir()
+  try {
+    const store = new SettingsStore(dir)
+    assert.equal(store.title, '')
+    store.update({ title: '  需要确认  ' })
+    assert.equal(store.title, '需要确认')
+    // Exactly at the cap is kept; one character over is rejected.
+    const max = '字'.repeat(32)
+    store.update({ title: max })
+    assert.equal(store.title, max)
+    assert.throws(() => store.update({ title: '字'.repeat(33) }), StoreError)
+    assert.equal(store.title, max)
+    // Trimming to empty removes the override rather than storing ''.
+    store.update({ title: '   ' })
+    assert.equal(store.title, '')
+    const again = new SettingsStore(dir)
+    assert.equal(again.title, '')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 const despPending = {
   id: 'q:call-1',
   kind: 'question' as const,

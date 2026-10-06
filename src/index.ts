@@ -82,6 +82,14 @@ const KIND_LABELS: Record<PendingKind, string> = {
   approval: '审批',
 }
 
+/** Push title used when neither the page nor the bundle Config sets one. */
+const DEFAULT_TITLE = 'DSH 等待人工确认'
+
+/** ServerChan truncates a title around 32 characters; the repeat suffix must fit. */
+const TITLE_MAX = 32
+/** Title budget left for the user's own words once `（第 N 次）` is appended. */
+const TITLE_BASE_MAX = 20
+
 interface CipherBox {
   iv: string
   tag: string
@@ -92,8 +100,10 @@ interface StateFile {
   version: 1
   sendkeyCipher?: CipherBox
   /** Settings-page overrides; everything here beats the bundle-patch Config. */
+  enabled?: boolean
   thresholdMinutes?: number
   repeatMinutes?: number
+  title?: string
   proxy?: string
   webUrl?: string
   /** The settings page explicitly chose "push without a link" ('' patch). */
@@ -103,7 +113,7 @@ interface StateFile {
 /** Rejected settings patch; `code` maps directly to the API error. */
 class StoreError extends Error {
   constructor(
-    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes' | 'invalid-weburl',
+    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes' | 'invalid-weburl' | 'invalid-title',
     message: string,
   ) {
     super(message)
@@ -115,8 +125,10 @@ class StoreError extends Error {
 interface StorePatch {
   sendkey?: string
   clearKey?: boolean
+  enabled?: boolean
   thresholdMinutes?: number
   repeatMinutes?: number
+  title?: string
   proxy?: string
   webUrl?: string
 }
@@ -227,6 +239,16 @@ class SettingsStore {
     return this.read().repeatMinutes
   }
 
+  /** Stored master switch: undefined = never set on the page (bundle Config wins). */
+  get enabled(): boolean | undefined {
+    return this.read().enabled
+  }
+
+  /** Stored push title override ('' when none). */
+  get title(): string {
+    return this.read().title ?? ''
+  }
+
   /** Stored proxy (sanitized, '' when none). */
   get proxy(): string {
     return this.read().proxy ?? ''
@@ -257,6 +279,7 @@ class SettingsStore {
       if (patch.clearKey !== true) next.sendkeyCipher = encrypt(patch.sendkey.trim(), this.key)
     }
     if (patch.clearKey === true) delete next.sendkeyCipher
+    if (patch.enabled !== undefined) next.enabled = patch.enabled === true
     if (patch.thresholdMinutes !== undefined) {
       const value = minutesValue(patch.thresholdMinutes, 1, 1440)
       if (value === null) throw new StoreError('invalid-minutes', '阈值必须为 1–1440 的整数分钟')
@@ -266,6 +289,14 @@ class SettingsStore {
       const value = minutesValue(patch.repeatMinutes, 0, 1440)
       if (value === null) throw new StoreError('invalid-minutes', '重复间隔必须为 0–1440 的整数分钟')
       next.repeatMinutes = value
+    }
+    if (patch.title !== undefined) {
+      const trimmed = patch.title.trim()
+      // '' restores the shipped default rather than storing an empty title,
+      // which would push as an untitled notification.
+      if (trimmed === '') delete next.title
+      else if (trimmed.length > 32) throw new StoreError('invalid-title', '推送标题最多 32 个字符')
+      else next.title = trimmed
     }
     if (patch.proxy !== undefined) {
       const trimmed = patch.proxy.trim()
@@ -314,6 +345,10 @@ class SettingsStore {
       if (threshold !== null) file.thresholdMinutes = threshold
       const repeat = minutesValue(parsed.repeatMinutes, 0, 1440)
       if (repeat !== null) file.repeatMinutes = repeat
+      if (typeof parsed.enabled === 'boolean') file.enabled = parsed.enabled
+      if (typeof parsed.title === 'string' && parsed.title.trim() !== '' && parsed.title.length <= 32) {
+        file.title = parsed.title.trim()
+      }
       if (typeof parsed.proxy === 'string') {
         const normalized = proxyOf(parsed.proxy)
         if (normalized !== null) file.proxy = normalized
@@ -342,10 +377,10 @@ class SettingsStore {
 /** Merge settings-store overrides over the bundle-patch Config. */
 function effectiveOf(config: Config, store: SettingsStore): EffectiveSettings {
   return {
-    enabled: config.enabled ?? true,
+    enabled: store.enabled ?? config.enabled ?? true,
     thresholdMinutes: store.thresholdMinutes ?? config.thresholdMinutes ?? 5,
     repeatMinutes: store.repeatMinutes ?? config.repeatMinutes ?? 0,
-    title: (config.title ?? '').trim() || 'DSH 等待人工确认',
+    title: store.title !== '' ? store.title : ((config.title ?? '').trim() || DEFAULT_TITLE),
     webUrl: store.noLink
       ? ''
       : store.webUrl !== '' ? store.webUrl : (config.webUrl ?? '').trim(),
@@ -363,6 +398,7 @@ function editableView(config: Config, store: SettingsStore): {
   proxy: string
   credentialConfigured: boolean
   hasStoredKey: boolean
+  stateDir: string
 } {
   const eff = effectiveOf(config, store)
   return {
@@ -374,6 +410,7 @@ function editableView(config: Config, store: SettingsStore): {
     proxy: redactProxy(eff.proxy),
     credentialConfigured: resolveCredential(config, store) !== '',
     hasStoredKey: store.hasStoredKey,
+    stateDir: stateDirOf(config),
   }
 }
 
@@ -483,9 +520,9 @@ function resolveCredential(config: Config, store: SettingsStore): string {
   return (process.env.DSH_SERVERCHAN_SENDKEY ?? '').trim()
 }
 
-function pushTitle(config: Config, pending: PendingInteraction): string {
-  const base = truncate((config.title ?? '').trim() || 'DSH 等待人工确认', 20)
-  return pending.pushes > 1 ? `${base}（第 ${pending.pushes} 次）` : base
+function pushTitle(eff: EffectiveSettings, pending: PendingInteraction): string {
+  const base = truncate(eff.title, TITLE_BASE_MAX)
+  return pending.pushes > 1 ? truncate(`${base}（第 ${pending.pushes} 次）`, TITLE_MAX) : base
 }
 
 export function pushDesp(pending: PendingInteraction, config: Config, eff: EffectiveSettings): string {
@@ -616,12 +653,18 @@ export function apply(ctx: Context, config: Config): void {
       // previous push (or the threshold tick) was in flight must not send a
       // stale notice for an already-answered interaction.
       if (!tracker.has(pending.id)) return 'terminal-failure'
+      // The master switch is read here, not at wiring time, so toggling it on
+      // the settings page takes effect without a restart. Tracked entries stay
+      // pending (visible on the page) and are pushed once it is back on, which
+      // is why the reminder defers instead of dropping.
+      if (!settings().enabled) return 'deferred'
       const credential = resolveCredential(config, store)
       if (credential === '') {
         log.warn(`pending ${pending.id} not pushed: no ServerChan credential configured`)
         return 'deferred' // no network call; the key may be configured in the meantime
       }
-      const result = await pushNow(credential, pushTitle(config, pending), pushDesp(pending, config, settings()))
+      const eff = settings()
+      const result = await pushNow(credential, pushTitle(eff, pending), pushDesp(pending, config, eff))
       if (result.ok) {
         log.info(`pushed ${pending.kind} reminder (${pending.id}, push #${pending.pushes})`)
       } else {
@@ -673,11 +716,15 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   const boot = settings()
-  if (boot.enabled && boot.thresholdMinutes > 0) {
+  if (boot.thresholdMinutes > 0) {
     // Subscribe before folding list(): a session that attaches between the
     // two would otherwise be missed. Constructor seeds do not emit
     // session/event, so this is the only way to watch an ask that was
     // already pending when dsh web (or this plugin) came up.
+    //
+    // The master switch deliberately does not gate this wiring: entries are
+    // always tracked, and `enabled` is re-read per fire. Skipping the wiring
+    // while off would make turning the switch on need a restart.
     ctx.on('session/created', session => { recoverSession(session) })
     const sessions = ctx.get('sessions')
     if (sessions !== undefined) {
@@ -810,6 +857,8 @@ export function apply(ctx: Context, config: Config): void {
         if (typeof record['sendkey'] === 'string') patch.sendkey = record['sendkey']
         if (typeof record['thresholdMinutes'] === 'number') patch.thresholdMinutes = record['thresholdMinutes']
         if (typeof record['repeatMinutes'] === 'number') patch.repeatMinutes = record['repeatMinutes']
+        if (typeof record['enabled'] === 'boolean') patch.enabled = record['enabled']
+        if (typeof record['title'] === 'string') patch.title = record['title']
         if (typeof record['proxy'] === 'string') patch.proxy = record['proxy']
         if (typeof record['webUrl'] === 'string') patch.webUrl = record['webUrl']
         if (Object.keys(patch).length === 0) {

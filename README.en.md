@@ -39,14 +39,14 @@ The default threshold is five minutes and one successful alert per interaction. 
 
 <p align="center">
   <img src="./assets/readme/settings.png" width="760" alt="ServerChan alerts settings: SendKey, threshold, repeat interval, proxy, and Harness link" /><br>
-  <em>Configure the push credential, reminder timing, optional proxy, and Harness link, then send a test alert. Every <code>127.0.0.1</code> value shown is a local loopback example; since 0.1.5 the jump link is empty by default. A stored SendKey is never echoed.</em>
+  <em>Configure the push credential, reminder timing, optional proxy, and Harness link, then send a test alert. Every <code>127.0.0.1</code> value shown is a local loopback example; since 0.1.5 the jump link is empty by default. A stored SendKey is never echoed. The screenshot predates the redesign; see the 0.2.0 notes for the current layout.</em>
 </p>
 
 ## Host and desktop compatibility
 
 This update targets DSH `0.2.0-rc.2` and the desktop client of the same version. The development team reports it working after migration, and runtime versions and bundle admission requirements have been checked. The desktop settings UI, real background alerts and notification-client handling of `dsh://` still need validation in the actual environment; load compatibility is not end-to-end acceptance.
 
-**0.1.6** adds English and Chinese names and descriptions to the plugin manager, following the client language. Monitoring and push behavior are unchanged. See [CHANGELOG.md](./CHANGELOG.md) for update notes.
+**0.2.0** rebuilds the settings page on the official design tokens and UI primitives, splits it into six cards, adds a master switch and a push-title setting, and shows live wait times and alert counts in the pending queue. See [CHANGELOG.md](./CHANGELOG.md) for behavior and copy changes.
 
 ## Install
 
@@ -82,11 +82,16 @@ New to ServerChan? Follow the official [SendKey guide](https://sct.ftqq.com/docs
 - **Push URL / SendKey** accepts a classic `SCT...` key, a ServerChan³ `sctp...` key, or the official complete HTTPS URL shown in the console.
   - `SCT...` is ServerChan Turbo and commonly delivers through WeChat.
   - `sctp...` is ServerChan³ and delivers through the ServerChan³ app.
+- **Master switch** pauses or resumes alerts immediately, with no restart. While it is off, tracked interactions stay in the queue and are alerted once it is back on.
 - **Threshold** defaults to five minutes. Changes apply to interactions that start after the save.
 - **Repeat interval** defaults to zero: one successful alert only.
+- **Push title** accepts up to 32 characters (counted as characters); leaving it blank uses the default title.
 - **HTTP proxy** is optional; credentials embedded in the proxy URL are rejected.
 - **Push jump link** is empty by default, so the push body carries no link. Optionally, `dsh://open` brings DeepSeek Harness to the foreground when opened on a computer with the app and protocol registered; it cannot remotely wake the computer from a phone, and support in the notification client must be checked separately. An `http(s)://` value opens a browser instead — on a phone, `127.0.0.1` points to the phone itself, so use a protected LAN/VPN address for mobile access (the current desktop client binds its Web GUI to loopback only).
+- **Pending queue** lists what is being timed right now, with its kind, detail, wait time, and alert count.
 - **Test push** sends one message with the current settings.
+
+Edits are held on the page until you press Save. A stored SendKey is never shown again: leave the field blank to keep it, or type a new key to replace it.
 
 Settings-page values override the bundle-patch defaults:
 

@@ -2,9 +2,23 @@
  * Build both halves of dsh-serverchan-watchdog:
  *  - node half:   src/index.ts            -> lib/index.js   (ESM, node)
  *  - client half: src/client/index.tsx    -> lib/client.js  (CJS closure for window.__ModuleLoader__)
- * Client externals mirror the loader module table (packages/client/web/src/platform.ts).
+ *
+ * Client externals mirror the loader module table
+ * (packages/client/web/src/platform.ts): React, Cordis, slots, and the shared
+ * ui-primitives controls the settings page composes.
+ *
+ * `*.module.css` is compiled here instead of by tsdown's CSS pipeline, which
+ * the loader artifact does not consume: each sheet becomes its hashed class
+ * map plus one `<style data-plugin=...>` tag injected when the factory runs,
+ * the same mechanism ui-primitives ships.
  */
-import { defineConfig } from 'tsdown'
+import { readFile } from 'node:fs/promises'
+import { relative, resolve } from 'node:path'
+import { transform } from 'lightningcss'
+import { defineConfig, type TsdownPlugin } from 'tsdown'
+
+/** Plugin id; also the `style[data-plugin]` marker and module-table row name. */
+const PLUGIN_ID = 'dsh-serverchan-watchdog'
 
 const PLATFORM_MODULES = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
@@ -15,9 +29,59 @@ const PLATFORM_MODULES = [
 
 const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, '@deepseek-ai/dsh-client-runtime/client']
 
+/**
+ * Virtual-id prefix keeping CSS Modules away from tsdown's own `.css` handling.
+ * The suffix must not end in `.css` so the pipeline's CSS guard does not claim it.
+ */
+const CSS_VIRTUAL_PREFIX = '\0watchdog-css:'
+const CSS_VIRTUAL_SUFFIX = '.mjs'
+
+/** Stable, path-derived id so a rebuilt sheet keeps injecting under one tag. */
+function cssTagId(fileId: string): string {
+  return `${PLUGIN_ID}/${relative(process.cwd(), fileId).replaceAll('\\', '/')}`
+}
+
+/**
+ * Compile `*.module.css` to a hashed class map plus a one-time style injection.
+ * @returns A tsdown plugin resolving CSS Modules imports in the client build.
+ */
+function cssModulesPlugin(): TsdownPlugin {
+  return {
+    name: 'watchdog-css-modules',
+    resolveId(source: string, importer: string | undefined) {
+      if (!source.endsWith('.module.css')) return null
+      const base = importer === undefined ? process.cwd() : resolve(importer, '..')
+      return CSS_VIRTUAL_PREFIX + resolve(base, source) + CSS_VIRTUAL_SUFFIX
+    },
+    async load(id: string) {
+      if (!id.startsWith(CSS_VIRTUAL_PREFIX)) return null
+      const fileId = id.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const compiled = transform({
+        filename: fileId,
+        code: await readFile(fileId),
+        cssModules: { pattern: '[hash]_[local]' },
+      })
+      const classMap: Record<string, string> = {}
+      for (const [local, value] of Object.entries(compiled.exports)) classMap[local] = value.name
+      return [
+        `const css = ${JSON.stringify(compiled.code.toString())};`,
+        `const tagId = ${JSON.stringify(cssTagId(fileId))};`,
+        'if (typeof document !== \'undefined\' && document.querySelector(\'style[data-plugin-css="\' + tagId + \'"]\') === null) {',
+        '  const tag = document.createElement(\'style\');',
+        `  tag.dataset.plugin = ${JSON.stringify(PLUGIN_ID)};`,
+        '  tag.dataset.pluginCss = tagId;',
+        '  tag.textContent = css;',
+        '  document.head.appendChild(tag);',
+        '}',
+        `export default ${JSON.stringify(classMap)};`,
+      ].join('\n')
+    },
+  }
+}
+
 export default defineConfig([
   {
-    name: 'dsh-serverchan-watchdog',
+    name: PLUGIN_ID,
     entry: { index: 'src/index.ts' },
     outDir: 'lib',
     format: ['esm'],
@@ -27,7 +91,7 @@ export default defineConfig([
     dts: false,
   },
   {
-    name: 'dsh-serverchan-watchdog/client',
+    name: `${PLUGIN_ID}/client`,
     entry: { client: 'src/client/index.tsx' },
     outDir: 'lib',
     format: ['cjs'],
@@ -40,10 +104,11 @@ export default defineConfig([
     define: {
       'process.env.NODE_ENV': JSON.stringify('production'),
     },
+    plugins: [cssModulesPlugin()],
     noExternal: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
     outputOptions: {
       entryFileNames: 'client.js',
-      banner: 'window.__ModuleLoader__.load({ id: "dsh-serverchan-watchdog", factory: (require) => {',
+      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
       footer: 'return module.exports; } });',
       intro: 'var module = { exports: {} }; var exports = module.exports;',
     },
