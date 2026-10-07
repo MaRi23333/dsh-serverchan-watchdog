@@ -6,6 +6,11 @@
  * the platform module table — and checks the bundle's arrival contract, its
  * registration face, and the stylesheet it injects.
  *
+ * Determinism tests additionally pin the hashed class names and the
+ * path-derived tag id to the repo-relative sheet path, so rebuilding in
+ * another checkout or from another working directory yields the same
+ * shipped artifact.
+ *
  * `@deepseek-ai/dsh-client-ui-primitives` is stubbed with faithful, minimal
  * stand-ins. The real package's barrel pulls a peer tree the shell supplies
  * (shiki, katex, the markdown stack) that is not worth installing here; the
@@ -21,8 +26,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { transform } from 'lightningcss'
+import { repoRelative } from '../tsdown.config.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
@@ -161,14 +169,20 @@ test('the stylesheet is injected under a plugin-scoped tag and hardcodes no colo
   assert.deepEqual(literals, [], `stylesheet hardcodes colors: ${literals.join(', ')}`)
 })
 
+/** Parse the hashed class map the bundle embeds for the settings sheet. */
+function bundleClassMap(source: string): Record<string, string> {
+  const marker = 'var settings_module_css_default = '
+  assert.ok(source.includes(marker), 'no settings class map in the bundle')
+  const from = source.indexOf(marker) + marker.length
+  return JSON.parse(source.slice(from, source.indexOf('};', from) + 1)) as Record<string, string>
+}
+
 test('every class the component uses resolves, and every declared class has a rule', () => {
   const source = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
   const css = JSON.parse((source.match(/const css = ("(?:[^"\\]|\\.)*");/) as RegExpMatchArray)[1]) as string
-  const marker = 'var settings_module_css_default = '
-  const from = source.indexOf(marker) + marker.length
-  const map = JSON.parse(source.slice(from, source.indexOf('};', from) + 1)) as Record<string, string>
+  const map = bundleClassMap(source)
   const used = new Set(
-    [...source.slice(from).matchAll(/settings_module_css_default\.([A-Za-z0-9_]+)/g)].map(m => m[1] as string),
+    [...source.matchAll(/settings_module_css_default\.([A-Za-z0-9_]+)/g)].map(m => m[1] as string),
   )
   const missing = [...used].filter(name => !(name in map))
   assert.deepEqual(missing, [], `component uses undeclared classes: ${missing.join(', ')}`)
@@ -176,6 +190,32 @@ test('every class the component uses resolves, and every declared class has a ru
     .filter(([, hashed]) => !css.includes(`.${hashed}`))
     .map(([name]) => name)
   assert.deepEqual(ruleless, [], `classes declared without rules: ${ruleless.join(', ')}`)
+})
+
+test('class-name hashes derive from the repo-relative filename, not the checkout path', async () => {
+  const map = bundleClassMap(readFileSync(join(root, 'lib', 'client.js'), 'utf8'))
+  assert.ok(Object.keys(map).length > 0, 'settings class map is empty')
+  const cssPath = join(root, 'src', 'client', 'settings.module.css')
+  const compiled = transform({
+    filename: repoRelative(cssPath),
+    code: await readFile(cssPath),
+    cssModules: { pattern: '[hash]_[local]' },
+  })
+  const expected: Record<string, string> = {}
+  for (const [local, value] of Object.entries(compiled.exports ?? {})) expected[local] = value.name
+  assert.deepEqual(map, expected)
+})
+
+test('path-derived ids stay repo-relative regardless of the working directory', () => {
+  const cssPath = join(root, 'src', 'client', 'settings.module.css')
+  assert.equal(repoRelative(cssPath), 'src/client/settings.module.css')
+  const previousCwd = process.cwd()
+  process.chdir(dirname(root))
+  try {
+    assert.equal(repoRelative(cssPath), 'src/client/settings.module.css')
+  } finally {
+    process.chdir(previousCwd)
+  }
 })
 
 test('the primitives stay external so the shell owns their instance', () => {
@@ -195,3 +235,11 @@ test('the client bundle never ships the host half or its secrets path', () => {
   assert.ok(!source.includes('state.json'), 'client bundle references the host state file')
 })
 
+test('the shipped client artifacts embed no build-machine paths', () => {
+  for (const artifact of ['lib/client.js', 'lib/client.js.map']) {
+    const contents = readFileSync(join(root, artifact), 'utf8')
+    const leaks = [...new Set(contents.match(/(?<![A-Za-z])[A-Za-z]:[\\/]/g) ?? [])]
+    assert.deepEqual(leaks, [], `${artifact} embeds absolute paths: ${leaks.join(', ')}`)
+    assert.ok(!contents.includes(root), `${artifact} embeds the checkout root`)
+  }
+})

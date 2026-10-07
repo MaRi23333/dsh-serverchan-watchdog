@@ -13,12 +13,29 @@
  * the same mechanism ui-primitives ships.
  */
 import { readFile } from 'node:fs/promises'
-import { relative, resolve } from 'node:path'
+import { dirname, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { transform } from 'lightningcss'
-import { defineConfig, type TsdownPlugin } from 'tsdown'
+import { defineConfig, type Options } from 'tsdown'
 
 /** Plugin id; also the `style[data-plugin]` marker and module-table row name. */
 const PLUGIN_ID = 'dsh-serverchan-watchdog'
+
+/** Directory of this config file; the one anchor that survives every checkout. */
+const CONFIG_ROOT = dirname(fileURLToPath(import.meta.url))
+
+/** Rolldown plugin shape accepted by tsdown's `plugins` option. */
+type TsdownPlugin = Extract<Options['plugins'], readonly unknown[]>[number]
+
+/**
+ * Repo-relative, forward-slash form of a repo path. Class-name hashes and
+ * style-tag ids are derived from this string, so they stay independent of
+ * where the checkout lives and which working directory ran the build.
+ * Exported for the client-render regression tests.
+ */
+export function repoRelative(fileId: string): string {
+  return relative(CONFIG_ROOT, fileId).replaceAll('\\', '/')
+}
 
 const PLATFORM_MODULES = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
@@ -37,8 +54,8 @@ const CSS_VIRTUAL_PREFIX = '\0watchdog-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 
 /** Stable, path-derived id so a rebuilt sheet keeps injecting under one tag. */
-function cssTagId(fileId: string): string {
-  return `${PLUGIN_ID}/${relative(process.cwd(), fileId).replaceAll('\\', '/')}`
+function cssTagId(repoPath: string): string {
+  return `${PLUGIN_ID}/${repoPath}`
 }
 
 /**
@@ -51,21 +68,24 @@ function cssModulesPlugin(): TsdownPlugin {
     resolveId(source: string, importer: string | undefined) {
       if (!source.endsWith('.module.css')) return null
       const base = importer === undefined ? process.cwd() : resolve(importer, '..')
-      return CSS_VIRTUAL_PREFIX + resolve(base, source) + CSS_VIRTUAL_SUFFIX
+      // Rolldown echoes module ids into `//#region` comments, so the virtual
+      // id carries the repo-relative path; an absolute id would ship the
+      // build machine's directory layout inside lib/client.js.
+      return CSS_VIRTUAL_PREFIX + repoRelative(resolve(base, source)) + CSS_VIRTUAL_SUFFIX
     },
     async load(id: string) {
       if (!id.startsWith(CSS_VIRTUAL_PREFIX)) return null
-      const fileId = id.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const repoPath = id.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
       const compiled = transform({
-        filename: fileId,
-        code: await readFile(fileId),
+        filename: repoPath,
+        code: await readFile(resolve(CONFIG_ROOT, repoPath)),
         cssModules: { pattern: '[hash]_[local]' },
       })
       const classMap: Record<string, string> = {}
-      for (const [local, value] of Object.entries(compiled.exports)) classMap[local] = value.name
+      for (const [local, value] of Object.entries(compiled.exports ?? {})) classMap[local] = value.name
       return [
         `const css = ${JSON.stringify(compiled.code.toString())};`,
-        `const tagId = ${JSON.stringify(cssTagId(fileId))};`,
+        `const tagId = ${JSON.stringify(cssTagId(repoPath))};`,
         'if (typeof document !== \'undefined\' && document.querySelector(\'style[data-plugin-css="\' + tagId + \'"]\') === null) {',
         '  const tag = document.createElement(\'style\');',
         `  tag.dataset.plugin = ${JSON.stringify(PLUGIN_ID)};`,

@@ -82,10 +82,10 @@ New to ServerChan? Follow the official [SendKey guide](https://sct.ftqq.com/docs
 - **Push URL / SendKey** accepts a classic `SCT...` key, a ServerChan³ `sctp...` key, or the official complete HTTPS URL shown in the console.
   - `SCT...` is ServerChan Turbo and commonly delivers through WeChat.
   - `sctp...` is ServerChan³ and delivers through the ServerChan³ app.
-- **Master switch** pauses or resumes alerts immediately, with no restart. While it is off, tracked interactions stay in the queue and are alerted once it is back on.
+- **Master switch** pauses or resumes alerts after saving, without a restart. While off, tracked items stay in the queue. Overdue items are checked every five minutes and resume on the next check after re-enabling.
 - **Threshold** defaults to five minutes. Changes apply to interactions that start after the save.
 - **Repeat interval** defaults to zero: one successful alert only.
-- **Push title** accepts up to 32 characters (counted as characters); leaving it blank uses the default title.
+- **Push title** accepts up to 32 characters; leaving it blank uses the default title. Delivery uses the first 20 characters to reserve room for the repeat-count suffix.
 - **HTTP proxy** is optional; credentials embedded in the proxy URL are rejected.
 - **Push jump link** is empty by default, so the push body carries no link. Optionally, `dsh://open` brings DeepSeek Harness to the foreground when opened on a computer with the app and protocol registered; it cannot remotely wake the computer from a phone, and support in the notification client must be checked separately. An `http(s)://` value opens a browser instead — on a phone, `127.0.0.1` points to the phone itself, so use a protected LAN/VPN address for mobile access (the current desktop client binds its Web GUI to loopback only).
 - **Pending queue** lists what is being timed right now, with its kind, detail, wait time, and alert count.

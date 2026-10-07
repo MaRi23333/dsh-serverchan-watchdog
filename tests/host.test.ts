@@ -8,13 +8,82 @@ import assert from 'node:assert/strict'
 import './env-isolation.ts'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { Readable } from 'node:stream'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { StoreError, SettingsStore, guardLoopback, guardWrite, pushDesp, sendPush, type Config, type EffectiveSettings } from '../src/index.ts'
+import { apply, StoreError, SettingsStore, guardLoopback, guardWrite, pushDesp, sendPush, type Config, type EffectiveSettings } from '../src/index.ts'
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'scw-test-'))
 }
+
+test('registered status and config handlers expose only safe fields, never storage paths', async () => {
+  const dir = tempDir()
+  assert.equal(isAbsolute(dir), true)
+  type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
+  const routes = new Map<string, Handler>()
+  const cleanups: Array<() => void> = []
+  const ctx = {
+    logger: () => ({ info() {}, warn() {} }),
+    on() {},
+    get() { return undefined },
+    effect(callback: () => void | (() => void)) {
+      const cleanup = callback()
+      if (typeof cleanup === 'function') cleanups.push(cleanup)
+    },
+    inject(_services: string[], callback: (context: unknown) => void) { callback(ctx) },
+    webServer: {
+      register(route: { path: string; handler: Handler }) {
+        routes.set(route.path, route.handler)
+        return () => { routes.delete(route.path) }
+      },
+    },
+  }
+  try {
+    apply(ctx as unknown as Parameters<typeof apply>[0], { enabled: false, stateDir: dir })
+    const configKeys = [
+      'ok', 'enabled', 'thresholdMinutes', 'repeatMinutes', 'title', 'webUrl',
+      'proxy', 'credentialConfigured', 'hasStoredKey',
+    ]
+    for (const [path, method] of [
+      ['/serverchan-watchdog/status', 'GET'],
+      ['/serverchan-watchdog/config', 'GET'],
+      ['/serverchan-watchdog/config', 'POST'],
+    ]) {
+      const handler = routes.get(path)
+      assert.ok(handler, `apply registered ${path}`)
+      const req = Readable.from(method === 'POST' ? [Buffer.from('{"thresholdMinutes":7}')] : [])
+      Object.assign(req, {
+        method,
+        socket: { remoteAddress: '127.0.0.1' },
+        headers: { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+      })
+      let status = 0
+      let raw = ''
+      const res = {
+        writeHead(code: number) { status = code },
+        end(body: string) { raw = body },
+      } as unknown as ServerResponse
+      await handler(req as unknown as IncomingMessage, res)
+      assert.equal(status, 200, `${method} ${path}`)
+      const body = JSON.parse(raw) as Record<string, unknown>
+      const expectedKeys = path.endsWith('/status') ? [...configKeys, 'pending'] : configKeys
+      assert.deepEqual(Object.keys(body).sort(), [...expectedKeys].sort(), `${method} ${path} whitelist`)
+      assert.equal(Object.hasOwn(body, 'stateDir'), false)
+      assert.equal(raw.includes(JSON.stringify(dir).slice(1, -1)), false)
+      assert.equal(raw.includes(basename(dir)), false)
+      assert.equal(body['thresholdMinutes'], method === 'POST' ? 7 : 5)
+      assert.equal(body['credentialConfigured'], false)
+    }
+    // The custom host directory still holds the saved settings internally.
+    assert.equal(new SettingsStore(dir).thresholdMinutes, 7)
+  } finally {
+    for (const cleanup of cleanups.reverse()) cleanup()
+    assert.equal(dirname(resolve(dir)), resolve(tmpdir()))
+    assert.ok(basename(dir).startsWith('scw-test-'))
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('SettingsStore round-trips the encrypted sendkey and numeric fields', () => {
   const dir = tempDir()

@@ -11,15 +11,15 @@
 
 ### 功能 / Behavior
 
-- 新增总开关：可直接在设置页暂停或恢复提醒，无需重启。关闭时已跟踪的等待项保留在队列中，恢复后继续推送，而不是被丢弃。 / Added a master switch to pause or resume alerts without a restart. While off, tracked items stay in the queue and push once re-enabled instead of being dropped.
-- 新增「推送标题」设置（最多 32 字符，实时计数），留空则使用默认标题。 / Added a push-title setting (max 32 characters, live counter); leaving it blank uses the default title.
-- 设置页底部显示状态文件目录，便于排查。 / The state directory is now shown at the bottom of the page.
+- 新增总开关：保存后暂停或恢复提醒，无需重启。关闭时已跟踪的等待项保留在队列中，已到期的等待每 5 分钟重新检查，恢复后在下一次检查继续推送。 / Added a master switch to pause or resume alerts after saving, without a restart. Tracked items stay in the queue; overdue items are checked every five minutes and resume on the next check after re-enabling.
+- 新增「推送标题」设置（可保存最多 32 字符，实时计数），留空使用默认标题；发送时沿用前 20 个字符，为重复提醒后缀保留空间。 / Added a push-title setting (up to 32 saved characters, live counter); blank restores the default. Delivery retains the first 20 characters to reserve room for repeat-count suffixes.
+- 设置页底部说明本机加密存储，不向配置或状态接口暴露本机绝对目录。 / The footer explains encrypted local storage without exposing absolute state-directory paths in configuration or status responses.
 - 中英文文案补充了错误提示（密钥/代理/分钟数/链接/标题非法）与保存、测试状态。 / Added localized error copy (invalid key, proxy, minutes, URL, title) and save/test states.
 
 ### 工程 / Internals
 
-- 客户端构建支持 CSS Modules（哈希类名 + 按插件作用域注入 `<style>`），与官方打包产物一致。 / The client build now supports CSS Modules (hashed class names plus a plugin-scoped `<style>` injection), matching official bundles.
-- 新增 `tests/client-render.test.ts`，校验客户端产物的加载契约、注册面、样式注入与依赖外部化。测试 46 → 53 项。 / Added `tests/client-render.test.ts` covering the bundle's load contract, registration face, stylesheet injection, and externals; tests went 46 → 53.
+- 客户端构建支持 CSS Modules（稳定哈希类名 + 按插件作用域注入 `<style>`），类名不依赖安装目录。 / The client build now supports CSS Modules (stable hashed class names plus a plugin-scoped `<style>` injection), independent of checkout location.
+- 补充客户端加载、样式、依赖外部化、接口白名单和暂停后恢复提醒的回归测试。 / Added regression coverage for client loading, styles, externals, response allowlists and reminders resuming after a pause.
 
 ## 0.1.6（2026-10-04）
 

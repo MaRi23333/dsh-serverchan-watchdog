@@ -388,7 +388,7 @@ function effectiveOf(config: Config, store: SettingsStore): EffectiveSettings {
   }
 }
 
-/** Nothing that a response may expose: credentials stay encrypted on disk. */
+/** Safe response fields only; credentials and host filesystem paths stay private. */
 function editableView(config: Config, store: SettingsStore): {
   enabled: boolean
   thresholdMinutes: number
@@ -398,7 +398,6 @@ function editableView(config: Config, store: SettingsStore): {
   proxy: string
   credentialConfigured: boolean
   hasStoredKey: boolean
-  stateDir: string
 } {
   const eff = effectiveOf(config, store)
   return {
@@ -410,7 +409,6 @@ function editableView(config: Config, store: SettingsStore): {
     proxy: redactProxy(eff.proxy),
     credentialConfigured: resolveCredential(config, store) !== '',
     hasStoredKey: store.hasStoredKey,
-    stateDir: stateDirOf(config),
   }
 }
 

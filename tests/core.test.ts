@@ -88,6 +88,57 @@ test('PendingTracker fires once after the threshold', async () => {
   tracker.dispose()
 })
 
+test('PendingTracker resumes a paused reminder on the default retry cadence when repeats are disabled', async () => {
+  let clock = 0
+  let enabled = false
+  let deliveries = 0
+  const timers: Array<{ at: number; fn: () => void; cancelled: boolean }> = []
+  const tracker = new PendingTracker({
+    thresholdMs: 1_000,
+    repeatMs: 0,
+    now: () => clock,
+    after: (ms, fn) => {
+      const timer = { at: clock + ms, fn, cancelled: false }
+      timers.push(timer)
+      return timer
+    },
+    cancel: timer => { (timer as { cancelled: boolean }).cancelled = true },
+    onFire: () => {
+      if (!enabled) return 'deferred'
+      deliveries += 1
+      return 'delivered'
+    },
+  })
+  const advanceTo = async (time: number): Promise<void> => {
+    clock = time
+    for (const timer of [...timers]) {
+      if (!timer.cancelled && timer.at <= clock) {
+        timer.cancelled = true
+        timer.fn()
+      }
+    }
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  try {
+    tracker.start({ id: 'q:paused', kind: 'question', sessionId: 's', detail: 'd' })
+    await advanceTo(1_000)
+    assert.equal(deliveries, 0)
+    assert.equal(tracker.list()[0]?.pushes, 0)
+    assert.equal(timers.find(timer => !timer.cancelled)?.at, 301_000)
+    enabled = true
+    await advanceTo(300_999)
+    assert.equal(deliveries, 0)
+    await advanceTo(301_000)
+    assert.equal(deliveries, 1)
+    assert.equal(tracker.list()[0]?.pushes, 1)
+    assert.equal(timers.filter(timer => !timer.cancelled).length, 0)
+    await advanceTo(601_000)
+    assert.equal(deliveries, 1)
+  } finally {
+    tracker.dispose()
+  }
+})
+
 test('PendingTracker.stop() before the threshold suppresses the push', async () => {
   const fired: string[] = []
   const tracker = new PendingTracker({ thresholdMs: 20, repeatMs: 0, onFire: p => { fired.push(p.id) } })

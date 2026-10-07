@@ -118,7 +118,6 @@ export function WatchdogSettings(props: {
   const [credential, setCredential] = useState('')
   const [hasStoredKey, setHasStoredKey] = useState(false)
   const [credentialConfigured, setCredentialConfigured] = useState(false)
-  const [stateDir, setStateDir] = useState('')
   const [pending, setPending] = useState<readonly WatchdogPendingView[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -141,7 +140,6 @@ export function WatchdogSettings(props: {
     setDraft(draftOf(view))
     setHasStoredKey(view.hasStoredKey === true)
     setCredentialConfigured(view.credentialConfigured === true)
-    if (view.stateDir !== undefined) setStateDir(view.stateDir)
   }, [])
 
   // Initial load: settings and status together, so the header never renders a
@@ -563,9 +561,7 @@ export function WatchdogSettings(props: {
         </Button>
       </div>
 
-      {stateDir !== '' && (
-        <p className={css.footer}>{t('settings.sourceHint', { dir: stateDir })}</p>
-      )}
+      <p className={css.footer}>{t('settings.sourceHint')}</p>
     </div>
   )
 }

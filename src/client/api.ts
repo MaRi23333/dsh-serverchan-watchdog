@@ -5,7 +5,7 @@
  * response: `fetchConfig` reports whether one is stored, never its value.
  */
 
-/** Editable settings as the host renders them (no credential value). */
+/** Editable settings as the host renders them (no credential value or host paths). */
 export interface WatchdogConfigView {
   ok: boolean
   enabled?: boolean
@@ -16,8 +16,6 @@ export interface WatchdogConfigView {
   proxy?: string
   credentialConfigured?: boolean
   hasStoredKey?: boolean
-  /** Host-side directory holding the encrypted state, echoed for the footer. */
-  stateDir?: string
   error?: string
   message?: string
 }
