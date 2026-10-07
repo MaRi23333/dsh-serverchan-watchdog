@@ -38,8 +38,8 @@ The default threshold is five minutes and one successful alert per interaction. 
 ## Screenshot
 
 <p align="center">
-  <img src="./assets/readme/settings.png" width="760" alt="ServerChan alerts settings: SendKey, threshold, repeat interval, proxy, and Harness link" /><br>
-  <em>Configure the push credential, reminder timing, optional proxy, and Harness link, then send a test alert. Every <code>127.0.0.1</code> value shown is a local loopback example; since 0.1.5 the jump link is empty by default. A stored SendKey is never echoed. The screenshot predates the redesign; see the 0.2.0 notes for the current layout.</em>
+  <img src="./assets/readme/settings.png" width="760" alt="Rebuilt ServerChan settings: master switch, push channel and reminder timing" /><br>
+  <em>The top of the settings page shows the master switch and live status, with separate cards for credentials and reminder timing. A stored SendKey is never echoed. Further cards cover the message, jump link, network and pending queue.</em>
 </p>
 
 ## Host and desktop compatibility

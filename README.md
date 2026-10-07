@@ -38,8 +38,8 @@
 ## 界面截图
 
 <p align="center">
-  <img src="./assets/readme/settings.png" width="760" alt="Server酱推送小助手设置页：SendKey、提醒阈值、重复间隔、代理和 Harness 链接" /><br>
-  <em>设置页：配置推送凭据、提醒节奏、可选代理和 Harness 跳转链接，并可发送测试推送。图中的 <code>127.0.0.1</code> 均为本机回环示例；0.1.5 起跳转链接默认留空。已保存的 SendKey 不会回显。截图对应重构前的界面，新界面见 0.2.0 更新说明。</em>
+  <img src="./assets/readme/settings.png" width="760" alt="Server酱推送小助手新设置页：总开关、推送通道和提醒时机" /><br>
+  <em>设置页上半部分：总开关与运行状态一目了然，推送通道和提醒时机分卡片配置；已保存的 SendKey 不会回显。其余卡片可设置提醒文案、跳转链接和网络，并查看等待队列。</em>
 </p>
 
 ## 宿主与桌面端兼容
