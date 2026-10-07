@@ -181,6 +181,7 @@ test('every class the component uses resolves, and every declared class has a ru
   const source = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
   const css = JSON.parse((source.match(/const css = ("(?:[^"\\]|\\.)*");/) as RegExpMatchArray)[1]) as string
   const map = bundleClassMap(source)
+  assert.deepEqual(Object.keys(map), Object.keys(map).sort(), 'CSS exports must use a stable key order')
   const used = new Set(
     [...source.matchAll(/settings_module_css_default\.([A-Za-z0-9_]+)/g)].map(m => m[1] as string),
   )

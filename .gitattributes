@@ -1,0 +1,6 @@
+# Keep source maps and generated bundles reproducible across Git on Windows/Linux.
+*.ts text eol=lf
+*.tsx text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.map text eol=lf

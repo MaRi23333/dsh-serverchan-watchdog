@@ -82,7 +82,9 @@ function cssModulesPlugin(): TsdownPlugin {
         cssModules: { pattern: '[hash]_[local]' },
       })
       const classMap: Record<string, string> = {}
-      for (const [local, value] of Object.entries(compiled.exports ?? {})) classMap[local] = value.name
+      // The native export map has no iteration-order guarantee. Sort keys
+      // explicitly so independent processes emit the same class-map bytes.
+      for (const [local, value] of Object.entries(compiled.exports ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) classMap[local] = value.name
       return [
         `const css = ${JSON.stringify(compiled.code.toString())};`,
         `const tagId = ${JSON.stringify(cssTagId(repoPath))};`,
