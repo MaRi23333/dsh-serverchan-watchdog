@@ -356,6 +356,8 @@ export interface PendingSeed {
  * should honor a durable ignore list so a stuck row can be dismissed.
  * A callId-less result already in the log is not that caveat: it closed the
  * oldest open question, and that question must not come back as a seed.
+ * A replayed `tool/call` with the same callId is one open ask, not two: the
+ * first copy is kept, and closing that id drops every copy.
  *
  * @param events - the session's events in log order.
  * @param sessionId - session identity for the seeds.
@@ -384,8 +386,12 @@ export function recoverPending(
 
   const closeQuestion = (callId: string): void => {
     closedQuestions.add(callId)
-    const index = open.findIndex(seed => seed.kind !== 'approval' && seed.id === `q:${callId}`)
-    if (index >= 0) open.splice(index, 1)
+    // A replay may have appended the same call more than once. Closing it
+    // drops every copy; leaving one would look still pending.
+    for (let index = open.length - 1; index >= 0; index -= 1) {
+      const seed = open[index]
+      if (seed !== undefined && seed.kind !== 'approval' && seed.id === `q:${callId}`) open.splice(index, 1)
+    }
   }
 
   for (const event of events) {
@@ -396,6 +402,9 @@ export function recoverPending(
       const callId = data['callId']
       if (typeof callId !== 'string') continue
       if (closedQuestions.has(callId)) continue
+      // Same call replayed before its result is still one open ask. Keep the
+      // first copy so a single result cannot leave a duplicate seed behind.
+      if (open.some(seed => seed.id === `q:${callId}`)) continue
       open.push({
         id: `q:${callId}`,
         kind: name === 'exit_plan_mode' ? 'plan-review' : 'question',
@@ -425,6 +434,7 @@ export function recoverPending(
       const id = data['id']
       if (typeof id !== 'string') continue
       if (closedApprovals.has(id)) continue
+      if (open.some(seed => seed.id === `a:${id}`)) continue
       open.push({
         id: `a:${id}`,
         kind: 'approval',
@@ -438,8 +448,9 @@ export function recoverPending(
       const id = data['id']
       if (typeof id !== 'string') continue
       closedApprovals.add(id)
-      const index = open.findIndex(seed => seed.id === `a:${id}`)
-      if (index >= 0) open.splice(index, 1)
+      for (let index = open.length - 1; index >= 0; index -= 1) {
+        if (open[index]?.id === `a:${id}`) open.splice(index, 1)
+      }
     }
   }
   return open

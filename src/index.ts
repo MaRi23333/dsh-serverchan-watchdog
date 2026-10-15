@@ -945,13 +945,10 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const watchQuestion = (sessionId: string, callId: string, seed: Parameters<PendingTracker['start']>[0]): void => {
-    if (store.isIgnored(seed.id)) {
-      enqueueQuestion(sessionId, callId)
-      return
-    }
-    const queue = questionQueues.get(sessionId)
-    if (queue === undefined) questionQueues.set(sessionId, [callId])
-    else queue.push(callId)
+    // A replay of the same callId is the same ask. A second queue slot would
+    // survive the result that closes the first and then swallow the next one.
+    enqueueQuestion(sessionId, callId)
+    if (store.isIgnored(seed.id)) return
     tracker.start(seed)
   }
 
@@ -1023,23 +1020,26 @@ export function apply(ctx: Context, config: Config): void {
           store.forget(id)
           const queue = questionQueues.get(session.id)
           if (queue !== undefined) {
-            const index = queue.indexOf(callId)
-            if (index >= 0) queue.splice(index, 1)
-            if (queue.length === 0) questionQueues.delete(session.id)
+            const kept = queue.filter(entry => entry !== callId)
+            if (kept.length === 0) questionQueues.delete(session.id)
+            else if (kept.length !== queue.length) questionQueues.set(session.id, kept)
           }
           return
         }
         // Fallback: no call identity on the result; assume FIFO completion order.
         // An ignored call remains in the queue as a placeholder, so this shift
         // forgets that dismissal. stop() is a no-op when the call is not tracked,
-        // and the next live question keeps its timer.
+        // and the next live question keeps its timer. Every replayed copy of
+        // the consumed call goes with it.
         const queue = questionQueues.get(session.id)
         const head = queue?.shift()
-        if (head !== undefined) {
+        if (head !== undefined && queue !== undefined) {
           const id = `q:${head}`
           tracker.stop(id)
           store.forget(id)
-          if ((queue as string[]).length === 0) questionQueues.delete(session.id)
+          const kept = queue.filter(entry => entry !== head)
+          if (kept.length === 0) questionQueues.delete(session.id)
+          else questionQueues.set(session.id, kept)
         }
         return
       }

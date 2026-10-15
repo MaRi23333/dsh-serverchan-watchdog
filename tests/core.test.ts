@@ -570,6 +570,49 @@ test('recoverPending consumes callId-less results in FIFO order and leaves appro
   assert.deepEqual(withApproval.map(seed => seed.id), ['a:ap'])
 })
 
+test('recoverPending keeps one seed for a replayed call and closes every copy', () => {
+  const ask = (callId: string, time: number) => ({
+    type: 'tool/call',
+    time,
+    data: {
+      callId,
+      name: 'ask_user_question',
+      arguments: JSON.stringify({ questions: [{ question: callId }] }),
+    },
+  })
+  const anonymous = (time: number) => ({ type: 'tool/result', time, data: { message: {} } })
+  const identified = (callId: string, time: number) => ({
+    type: 'tool/result',
+    time,
+    data: { message: { source: { kind: 'tool', callId } } },
+  })
+
+  const replayed = recoverPending([ask('A', 1000), ask('A', 5000), ask('B', 6000)], 's1')
+  assert.deepEqual(replayed.map(seed => seed.id), ['q:A', 'q:B'])
+  assert.equal(replayed[0]?.startedAt, 1000)
+
+  // The identified result closes both copies, so the duplicate cannot stay pending.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), ask('A', 2), identified('A', 3), ask('B', 4)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  // One anonymous result consumes the replayed head entirely and leaves B.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), ask('A', 2), ask('B', 3), anonymous(4)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  // A replay that is not adjacent is still the same call.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), ask('B', 2), ask('A', 3), identified('A', 4)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  assert.deepEqual(recoverPending([
+    { type: 'approval/asked', time: 1, data: { id: 'ap', toolName: 'bash' } },
+    { type: 'approval/asked', time: 2, data: { id: 'ap', toolName: 'bash' } },
+    { type: 'approval/decided', time: 3, data: { id: 'ap' } },
+  ], 's1'), [])
+})
+
 test('readSessionLog prefers snapshotEvents (DSH 0.1.2+) and falls back to events', () => {
   const log = [{ type: 'approval/asked', time: 1, data: { id: 'a1' } }]
   assert.equal(readSessionLog({ snapshotEvents: () => log }).length, 1)

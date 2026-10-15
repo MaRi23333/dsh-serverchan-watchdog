@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- 设置页「等待中的确认」可以为卡住的项选择忽略。忽略写入本机状态，重启 DSH 后不再提醒，并可以恢复。被忽略的提问仍占着会话 FIFO 的位置，没有 callId 的结果会清掉这项忽略，而不会停掉下一项仍在等待的提醒。已忽略满 50 项时，新的忽略会被拒绝，已有记录不会被挤掉。重启恢复会按同样的 FIFO 消化日志里没有 callId 的结果，已经答完的忽略项不会再占位。 / Pending confirmations in settings can be ignored. The dismissal is stored on this machine, so a DSH restart does not remind again, and it can be restored. An ignored question keeps its FIFO slot, so a result without a callId clears that dismissal instead of stopping the next question that is still waiting. Once 50 confirmations are ignored, another ignore is refused instead of dropping an older dismissal. Restart recovery applies that same FIFO to callId-less results already in the log, so an answered dismissal does not come back as a placeholder.
+- 设置页「等待中的确认」可以为卡住的项选择忽略。忽略写入本机状态，重启 DSH 后不再提醒，并可以恢复。被忽略的提问仍占着会话 FIFO 的位置，没有 callId 的结果会清掉这项忽略，而不会停掉下一项仍在等待的提醒。已忽略满 50 项时，新的忽略会被拒绝，已有记录不会被挤掉。重启恢复会按同样的 FIFO 消化日志里没有 callId 的结果，已经答完的忽略项不会再占位。同一 callId 的重复 tool/call 只算一次，关闭时会清掉全部副本。 / Pending confirmations in settings can be ignored. The dismissal is stored on this machine, so a DSH restart does not remind again, and it can be restored. An ignored question keeps its FIFO slot, so a result without a callId clears that dismissal instead of stopping the next question that is still waiting. Once 50 confirmations are ignored, another ignore is refused instead of dropping an older dismissal. Restart recovery applies that same FIFO to callId-less results already in the log, so an answered dismissal does not come back as a placeholder. A replayed tool/call with the same callId counts once, and closing it drops every copy.
 
 ## 0.2.0（2026-10-07）
 
