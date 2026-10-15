@@ -345,6 +345,8 @@ export interface PendingSeed {
  * Includes:
  *  - `tool/call` of `ask_user_question` / `exit_plan_mode` without a matching
  *    `tool/result` (paired by `message.source.callId`);
+ *  - the same calls consumed by a `tool/result` that carries no call id,
+ *    in FIFO order, matching the live session handler;
  *  - `approval/asked` without a matching `approval/decided` (paired by id).
  *
  * An unanswered ask is by definition not yet answered, so an unclosed pair
@@ -352,18 +354,40 @@ export interface PendingSeed {
  * the human answering and the result being appended, the pair is still open
  * even though the human already answered. Callers that re-arm these seeds
  * should honor a durable ignore list so a stuck row can be dismissed.
+ * A callId-less result already in the log is not that caveat: it closed the
+ * oldest open question, and that question must not come back as a seed.
  *
  * @param events - the session's events in log order.
  * @param sessionId - session identity for the seeds.
  * @returns seeds to start, in log order.
  */
+/**
+ * Call id on a `tool/result`, or undefined when the live handler falls through
+ * to the question FIFO. A non-string call id is treated as missing so recovery
+ * and the live path agree on which results are anonymous.
+ */
+function toolResultCallId(data: Record<string, unknown>): string | undefined {
+  const message = data['message'] as { source?: { kind?: unknown; callId?: unknown } } | undefined
+  const source = message?.source
+  if (source?.kind !== 'tool') return undefined
+  return typeof source.callId === 'string' ? source.callId : undefined
+}
+
 export function recoverPending(
   events: readonly SessionEventView[],
   sessionId: string,
 ): PendingSeed[] {
-  const seeds: PendingSeed[] = []
-  const seenQuestions = new Set<string>()
-  const seenApprovals = new Set<string>()
+  /** Still-open seeds in log order. Question calls are the FIFO; approvals sit among them and are never shifted by an anonymous result. */
+  const open: PendingSeed[] = []
+  const closedQuestions = new Set<string>()
+  const closedApprovals = new Set<string>()
+
+  const closeQuestion = (callId: string): void => {
+    closedQuestions.add(callId)
+    const index = open.findIndex(seed => seed.kind !== 'approval' && seed.id === `q:${callId}`)
+    if (index >= 0) open.splice(index, 1)
+  }
+
   for (const event of events) {
     const data = event.data
     if (event.type === 'tool/call') {
@@ -371,8 +395,8 @@ export function recoverPending(
       if (name !== 'ask_user_question' && name !== 'exit_plan_mode') continue
       const callId = data['callId']
       if (typeof callId !== 'string') continue
-      if (seenQuestions.has(callId)) continue
-      seeds.push({
+      if (closedQuestions.has(callId)) continue
+      open.push({
         id: `q:${callId}`,
         kind: name === 'exit_plan_mode' ? 'plan-review' : 'question',
         sessionId,
@@ -383,15 +407,25 @@ export function recoverPending(
         startedAt: event.time ?? Date.now(),
       })
     } else if (event.type === 'tool/result') {
-      const message = data['message'] as { source?: { kind?: string; callId?: string } } | undefined
-      const callId = message?.source?.kind === 'tool' ? message.source.callId : undefined
-      if (callId === undefined) continue
-      seenQuestions.add(callId)
+      const callId = toolResultCallId(data)
+      if (callId !== undefined) {
+        // Same as the live path: an identified result closes that call even
+        // when it is not the FIFO head, and a result seen before its call
+        // keeps the later call from being re-opened.
+        closeQuestion(callId)
+        continue
+      }
+      // No call id. The live handler shifts the oldest open question,
+      // including an ignored placeholder. Do that here so recovery does not
+      // rebuild a tombstone for a question this result already answered.
+      const index = open.findIndex(seed => seed.kind !== 'approval')
+      const consumed = index >= 0 ? open[index] : undefined
+      if (consumed !== undefined) closeQuestion(consumed.id.slice(2))
     } else if (event.type === 'approval/asked') {
       const id = data['id']
       if (typeof id !== 'string') continue
-      if (seenApprovals.has(id)) continue
-      seeds.push({
+      if (closedApprovals.has(id)) continue
+      open.push({
         id: `a:${id}`,
         kind: 'approval',
         sessionId,
@@ -402,12 +436,11 @@ export function recoverPending(
       })
     } else if (event.type === 'approval/decided') {
       const id = data['id']
-      if (typeof id === 'string') seenApprovals.add(id)
+      if (typeof id !== 'string') continue
+      closedApprovals.add(id)
+      const index = open.findIndex(seed => seed.id === `a:${id}`)
+      if (index >= 0) open.splice(index, 1)
     }
   }
-  // Fold again, dropping every seed whose pair closed later than its opening
-  // (a result/decided may appear after the call in a crash-tail or replay).
-  return seeds.filter(seed => (
-    seed.kind === 'approval' ? !seenApprovals.has(seed.id.slice(2)) : !seenQuestions.has(seed.id.slice(2))
-  ))
+  return open
 }

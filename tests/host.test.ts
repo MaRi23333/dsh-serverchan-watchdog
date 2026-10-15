@@ -818,6 +818,111 @@ test('restoring an ignored question keeps its FIFO place ahead of the next quest
   }
 })
 
+test('recovery folds anonymous results already in the log before keeping ignores', async () => {
+  const dir = tempDir()
+  const mounts: HostMount[] = []
+  const ask = (callId: string, time: number) => ({
+    type: 'tool/call',
+    time,
+    data: {
+      callId,
+      name: 'ask_user_question',
+      arguments: JSON.stringify({ questions: [{ question: callId }] }),
+    },
+  })
+  const anonymous = (time: number) => ({ type: 'tool/result', time, data: { message: {} } })
+  let events: Array<Record<string, unknown>> = [ask('A', 1), ask('B', 2), ask('C', 3)]
+  const session = { id: 'sess-anon-recover', snapshotEvents: () => events }
+  try {
+    const first = mountHost(dir)
+    mounts.push(first)
+    first.emit('session/created', session)
+    for (const id of ['q:A', 'q:C']) {
+      const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id }))
+      assert.equal(ignored.status, 200, id)
+    }
+    let status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
+    assert.deepEqual(idsOf(status.json['ignored']).sort(), ['q:A', 'q:C'])
+    first.cleanup()
+
+    // The anonymous result was persisted before this process saw it. It
+    // answers A, the ignored FIFO head, so A must not come back as a tombstone.
+    events = [ask('A', 1), ask('B', 2), ask('C', 3), anonymous(4)]
+    const second = mountHost(dir)
+    mounts.push(second)
+    second.emit('session/created', session)
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
+    assert.deepEqual(idsOf(status.json['ignored']), ['q:C'])
+    assert.equal(new SettingsStore(dir).isIgnored('q:A'), false)
+
+    // The next anonymous result belongs to B. A stale tombstone for A would
+    // swallow it and leave B alerting.
+    second.emit('session/event', session, anonymous(5))
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), ['q:C'])
+
+    second.emit('session/event', session, anonymous(6))
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+    await flushTimers()
+  } finally {
+    for (const mount of mounts.reverse()) mount.cleanup()
+    await flushTimers()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('recovery does not re-arm a question an anonymous log result already closed', async () => {
+  const dir = tempDir()
+  const mounts: HostMount[] = []
+  const ask = (callId: string, time: number) => ({
+    type: 'tool/call',
+    time,
+    data: {
+      callId,
+      name: 'ask_user_question',
+      arguments: JSON.stringify({ questions: [{ question: callId }] }),
+    },
+  })
+  const anonymous = (time: number) => ({ type: 'tool/result', time, data: { message: {} } })
+  let events: Array<Record<string, unknown>> = [ask('A', 1), ask('B', 2)]
+  const session = { id: 'sess-anon-live', snapshotEvents: () => events }
+  try {
+    const first = mountHost(dir)
+    mounts.push(first)
+    first.emit('session/created', session)
+    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:B' }))
+    assert.equal(ignored.status, 200)
+    assert.deepEqual(idsOf(ignored.json['pending']), ['q:A'])
+    first.cleanup()
+
+    // A was not ignored and the log's anonymous result already answered it.
+    // B stays ignored. A must not be pending, and the next live anonymous
+    // result must clear B rather than a phantom copy of A.
+    events = [ask('A', 1), ask('B', 2), anonymous(3)]
+    const second = mountHost(dir)
+    mounts.push(second)
+    second.emit('session/created', session)
+    let status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), ['q:B'])
+
+    second.emit('session/event', session, anonymous(4))
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+    await flushTimers()
+  } finally {
+    for (const mount of mounts.reverse()) mount.cleanup()
+    await flushTimers()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('recovery keeps an ignored question ahead of the next one in the FIFO', async () => {
   const dir = tempDir()
   const mounts: HostMount[] = []

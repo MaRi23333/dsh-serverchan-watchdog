@@ -507,6 +507,69 @@ test('recoverPending seeds unclosed ask/approval pairs only', () => {
   assert.equal(seeds[1]?.kind, 'approval')
 })
 
+test('recoverPending consumes callId-less results in FIFO order and leaves approvals alone', () => {
+  const ask = (callId: string, time: number, name = 'ask_user_question') => ({
+    type: 'tool/call',
+    time,
+    data: {
+      callId,
+      name,
+      arguments: name === 'exit_plan_mode'
+        ? JSON.stringify({ plan: '# 计划' })
+        : JSON.stringify({ questions: [{ question: callId }] }),
+    },
+  })
+  const anonymous = (time: number) => ({ type: 'tool/result', time, data: { message: {} } })
+  const identified = (callId: string, time: number) => ({
+    type: 'tool/result',
+    time,
+    data: { message: { source: { kind: 'tool', callId } } },
+  })
+
+  // The anonymous result answers the head, not a question that opens later.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), anonymous(2), ask('B', 3)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  // Two open questions: one anonymous result closes only the oldest.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), ask('B', 2), anonymous(3)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  // A second anonymous result closes the new head. An identified result still
+  // closes its own call even when it is not the head, and a later anonymous
+  // result then takes whatever is oldest.
+  assert.deepEqual(
+    recoverPending([
+      ask('A', 1),
+      ask('B', 2),
+      ask('C', 3, 'exit_plan_mode'),
+      identified('B', 4),
+      anonymous(5),
+    ], 's1').map(seed => seed.id),
+    ['q:C'],
+  )
+  assert.deepEqual(
+    recoverPending([
+      ask('A', 1),
+      ask('C', 3, 'exit_plan_mode'),
+      identified('A', 4),
+      anonymous(5),
+    ], 's1'),
+    [],
+  )
+  // Extra anonymous results with an empty FIFO do not eat a question that
+  // has not been asked yet, and they do not close an approval.
+  const withApproval = recoverPending([
+    anonymous(1),
+    { type: 'approval/asked', time: 2, data: { id: 'ap', toolName: 'bash', reason: '跑' } },
+    ask('A', 3),
+    anonymous(4),
+    anonymous(5),
+  ], 's1')
+  assert.deepEqual(withApproval.map(seed => seed.id), ['a:ap'])
+})
+
 test('readSessionLog prefers snapshotEvents (DSH 0.1.2+) and falls back to events', () => {
   const log = [{ type: 'approval/asked', time: 1, data: { id: 'a1' } }]
   assert.equal(readSessionLog({ snapshotEvents: () => log }).length, 1)

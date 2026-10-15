@@ -937,6 +937,9 @@ export function apply(ctx: Context, config: Config): void {
     }
     // An empty log is also what a thrown snapshot becomes. Pruning dismissals
     // on that read would bring the reminder back at the next successful boot.
+    // `seeds` already folds callId-less results in FIFO order, so a dismissal
+    // those results consumed is absent here and retainOpen drops it instead
+    // of leaving a tombstone that would swallow the next anonymous result.
     if (events.length > 0) store.retainOpen(session.id, new Set(seeds.map(seed => seed.id)))
     for (const seed of seeds) armRecovered(session.id, seed)
   }
