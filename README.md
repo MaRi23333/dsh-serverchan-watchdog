@@ -114,7 +114,7 @@ dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
 
 - SendKey 保存在 `$DSH_HOME/serverchan-watchdog/state.json`，加密密钥为同目录 `key.bin`。两者会尽力收紧文件权限，但能同时读取这两个文件的本机账户仍可恢复 SendKey；这不是系统凭据库。
 - 只接受 Server酱官方 HTTPS 端点，拒绝带 userinfo、query、fragment、错误主机、错误路径或 UID 不匹配的地址。
-- 配置、状态和测试接口只接受本机回环请求；同机不受信进程仍可能读取待处理摘要、修改设置或触发测试消息。不要直接把 DSH 暴露到公网，反向代理、LAN/VPN 场景应在外层配置认证和访问控制。
+- 配置、状态、忽略和测试接口只接受本机回环请求；同机不受信进程仍可能读取待处理摘要、修改设置、忽略确认或触发测试消息。不要直接把 DSH 暴露到公网，反向代理、LAN/VPN 场景应在外层配置认证和访问控制。
 - 失败日志只保留 `timeout`、`network-failed`、HTTP 状态或业务错误类别，不记录 SendKey、完整 URL、响应正文或原始异常。
 - Server酱额度、失败计费和消息保留期限随渠道及套餐而异，请以官方[发送说明](https://sct.ftqq.com/docs/getting-started/sendkey/)和[常见问题](https://sct.ftqq.com/docs/getting-started/faq/)为准。
 
@@ -122,16 +122,17 @@ dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
 
 | 接口 | 方法 | 说明 |
 | --- | --- | --- |
-| `/serverchan-watchdog/status` | GET | 生效配置摘要与当前等待列表，不含凭据或本机状态目录路径 |
+| `/serverchan-watchdog/status` | GET | 生效配置摘要、当前等待列表与已忽略列表，不含凭据或本机状态目录路径 |
 | `/serverchan-watchdog/config` | GET | 可编辑设置视图，不含凭据 |
 | `/serverchan-watchdog/config` | POST | 保存 SendKey、总开关、阈值、重复间隔、标题、代理或链接 |
+| `/serverchan-watchdog/ignore` | POST | 忽略或恢复一条等待中的确认（`{ id, restore? }`），写入本机状态 |
 | `/serverchan-watchdog/test` | POST | 发送一条测试推送 |
 
 写接口要求 JSON 及回环同源校验。
 
 ## 已知限制
 
-- 如果主机在人工已答复但结果尚未写入会话日志的极短窗口内崩溃，重启恢复可能多提醒一次。
+- 如果主机在人工已答复但结果尚未写入会话日志的极短窗口内崩溃，重启恢复可能多提醒一次。可在设置页「等待中的确认」里忽略该项；忽略保存在本机，重启后不再提醒，也可恢复。
 - DSH 重启时，多个已经超过阈值且仍未处理的等待会同时恢复计时，可能在短时间内发送多条提醒并消耗 Server酱额度。
 - 推送前会重新确认该交互仍在等待，但无法撤销已经发出的 HTTP 请求。
 - 手机提醒只是入口；能否从手机打开 Harness 取决于你配置的地址和网络访问控制。

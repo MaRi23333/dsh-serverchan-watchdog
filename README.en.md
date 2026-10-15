@@ -114,7 +114,7 @@ The following fields leave the machine in a ServerChan message: interaction type
 
 - The SendKey ciphertext lives in `$DSH_HOME/serverchan-watchdog/state.json`; `key.bin` in the same directory decrypts it. File permissions are tightened where possible, but a local account that can read both files can recover the key. This is not an OS credential vault.
 - Only exact official ServerChan HTTPS endpoint shapes are accepted. Userinfo, query strings, fragments, wrong hosts or paths, and mismatched ServerChan³ UIDs are rejected.
-- Status, configuration, and test routes are loopback-only, but local processes remain inside the trust boundary. An untrusted local process can read pending details, change settings, or trigger a test message. Do not expose DSH directly to the public internet; protect reverse-proxy, LAN, and VPN access with authentication and access controls.
+- Status, configuration, ignore, and test routes are loopback-only, but local processes remain inside the trust boundary. An untrusted local process can read pending details, change settings, dismiss a confirmation, or trigger a test message. Do not expose DSH directly to the public internet; protect reverse-proxy, LAN, and VPN access with authentication and access controls.
 - Failure logs retain only a class such as `timeout`, `network-failed`, an HTTP status, or a business-error category—never the SendKey, complete URL, response body, or raw exception.
 - Quotas, failed-call accounting, and retention differ by channel and plan. See the official [SendKey guide](https://sct.ftqq.com/docs/getting-started/sendkey/) and [FAQ](https://sct.ftqq.com/docs/getting-started/faq/).
 
@@ -122,16 +122,17 @@ The following fields leave the machine in a ServerChan message: interaction type
 
 | Route | Method | Purpose |
 | --- | --- | --- |
-| `/serverchan-watchdog/status` | GET | effective configuration and pending list, without credentials or state-directory paths |
+| `/serverchan-watchdog/status` | GET | effective configuration, pending list, and ignored list, without credentials or state-directory paths |
 | `/serverchan-watchdog/config` | GET | editable configuration view without credentials |
 | `/serverchan-watchdog/config` | POST | save SendKey, timing, proxy, or link settings |
+| `/serverchan-watchdog/ignore` | POST | ignore or restore one pending confirmation (`{ id, restore? }`); stored in the local state file |
 | `/serverchan-watchdog/test` | POST | send one test alert |
 
 Write routes require JSON and loopback same-origin validation.
 
 ## Limitations
 
-- If the host crashes after a human answers but before the result reaches the session log, restart recovery may send one extra reminder.
+- If the host crashes after a human answers but before the result reaches the session log, restart recovery may send one extra reminder. Ignore that row under Pending confirmations in settings; the dismissal is stored on this machine, survives restarts, and can be restored.
 - After a DSH restart, multiple still-pending interactions that are already past the threshold are re-armed together and may send several alerts in a short period, consuming ServerChan quota.
 - The plugin checks that an interaction is still pending immediately before each push, but it cannot cancel an HTTP request already in flight.
 - A phone alert is only an entry point. Opening Harness on the phone depends on the configured URL and your network access controls.

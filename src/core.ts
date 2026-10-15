@@ -349,9 +349,9 @@ export interface PendingSeed {
  *
  * An unanswered ask is by definition not yet answered, so an unclosed pair
  * here is the ask still waiting — with one caveat: if the host died between
- * the human answering and the result being appended, this re-arms a watch on
- * an already-answered ask (harmless: no answer can be expected, the reminder
- * fires and the next session pass closes the pair).
+ * the human answering and the result being appended, the pair is still open
+ * even though the human already answered. Callers that re-arm these seeds
+ * should honor a durable ignore list so a stuck row can be dismissed.
  *
  * @param events - the session's events in log order.
  * @param sessionId - session identity for the seeds.

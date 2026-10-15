@@ -58,6 +58,16 @@ export type WatchdogKey =
   | 'settings.pending.empty'
   | 'settings.pending.waiting'
   | 'settings.pending.pushes'
+  | 'settings.pending.ignore'
+  | 'settings.pending.ignoring'
+  | 'settings.pending.restore'
+  | 'settings.pending.restoring'
+  | 'settings.pending.ignoreLabel'
+  | 'settings.pending.restoreLabel'
+  | 'settings.pending.ignoreHint'
+  | 'settings.pending.ignoredHeading'
+  | 'settings.pending.ignoredHint'
+  | 'settings.pending.actionFailed'
   | 'settings.pending.next'
   | 'settings.pending.next.none'
   | 'settings.pending.refresh'
@@ -84,12 +94,16 @@ export type WatchdogKey =
   | 'settings.status.noCredential'
   | 'settings.status.unreachable'
   | 'settings.status.pendingCount'
+  | 'settings.status.ignoredCount'
   | 'settings.sourceHint'
   | 'settings.error.invalid-sendkey'
   | 'settings.error.invalid-proxy'
   | 'settings.error.invalid-minutes'
   | 'settings.error.invalid-weburl'
   | 'settings.error.invalid-title'
+  | 'settings.error.invalid-id'
+  | 'settings.error.not-pending'
+  | 'settings.error.not-ignored'
   | 'settings.error.unknown'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -149,6 +163,16 @@ export const zh: Record<WatchdogKey, string> = {
   'settings.pending.empty': '暂无等待中的人工确认',
   'settings.pending.waiting': '已等待 {wait}',
   'settings.pending.pushes': '已提醒 {count} 次',
+  'settings.pending.ignore': '忽略',
+  'settings.pending.ignoring': '正在忽略…',
+  'settings.pending.restore': '恢复提醒',
+  'settings.pending.restoring': '正在恢复…',
+  'settings.pending.ignoreLabel': '忽略这项确认：{detail}',
+  'settings.pending.restoreLabel': '恢复这项确认的提醒：{detail}',
+  'settings.pending.ignoreHint': '卡住的确认可以忽略。忽略保存在本机，重启 DSH 后不再提醒，也可以随时恢复。',
+  'settings.pending.ignoredHeading': '已忽略',
+  'settings.pending.ignoredHint': '这些确认已停止提醒。恢复后若仍然无人处理，会重新开始计时。',
+  'settings.pending.actionFailed': '操作没有完成，请稍后再试',
   'settings.pending.next': '将于约 {mins} 分钟后提醒',
   'settings.pending.next.none': '等待时长已超过阈值',
   'settings.pending.refresh': '刷新',
@@ -175,12 +199,16 @@ export const zh: Record<WatchdogKey, string> = {
   'settings.status.noCredential': '缺少推送凭据',
   'settings.status.unreachable': '无法连接主机端',
   'settings.status.pendingCount': '{count} 项等待中',
+  'settings.status.ignoredCount': '{count} 项已忽略',
   'settings.sourceHint': '设置保存在本机，推送凭据由本机密钥加密，保存后不会回显。',
   'settings.error.invalid-sendkey': 'SendKey 格式无法识别，请检查是否复制完整',
   'settings.error.invalid-proxy': '代理地址无效：仅支持不带用户名密码的 http(s) 地址',
   'settings.error.invalid-minutes': '请输入 0–1440 的整数分钟',
   'settings.error.invalid-weburl': '跳转地址无效：仅支持 http(s) 或 dsh://',
   'settings.error.invalid-title': '推送标题最多 32 个字符',
+  'settings.error.invalid-id': '无法识别这项确认',
+  'settings.error.not-pending': '这项确认已经不在等待列表里',
+  'settings.error.not-ignored': '这项确认不在已忽略列表里',
   'settings.error.unknown': '保存失败，请查看主机端日志',
 }
 
@@ -235,6 +263,16 @@ export const en: Record<WatchdogKey, string> = {
   'settings.pending.empty': 'No pending human confirmation right now',
   'settings.pending.waiting': 'Waiting {wait}',
   'settings.pending.pushes': 'Alerted {count} times',
+  'settings.pending.ignore': 'Ignore',
+  'settings.pending.ignoring': 'Ignoring…',
+  'settings.pending.restore': 'Restore alerts',
+  'settings.pending.restoring': 'Restoring…',
+  'settings.pending.ignoreLabel': 'Ignore this confirmation: {detail}',
+  'settings.pending.restoreLabel': 'Restore alerts for this confirmation: {detail}',
+  'settings.pending.ignoreHint': 'Stuck confirmations can be ignored. The dismissal is stored on this machine, survives a DSH restart, and can be restored.',
+  'settings.pending.ignoredHeading': 'Ignored',
+  'settings.pending.ignoredHint': 'These confirmations no longer send alerts. Restoring one puts it back on the watch.',
+  'settings.pending.actionFailed': 'That action did not complete. Try again.',
   'settings.pending.next': 'Alerts in about {mins} min',
   'settings.pending.next.none': 'Past the threshold',
   'settings.pending.refresh': 'Refresh',
@@ -261,11 +299,15 @@ export const en: Record<WatchdogKey, string> = {
   'settings.status.noCredential': 'No push credential',
   'settings.status.unreachable': 'Cannot reach the host',
   'settings.status.pendingCount': '{count} waiting',
+  'settings.status.ignoredCount': '{count} ignored',
   'settings.sourceHint': 'Settings are stored on this machine. The push credential is encrypted with a local key and is never echoed back.',
   'settings.error.invalid-sendkey': 'That SendKey could not be recognized; check that it was copied completely',
   'settings.error.invalid-proxy': 'Invalid proxy: only http(s) addresses without username/password are supported',
   'settings.error.invalid-minutes': 'Enter a whole number of minutes between 0 and 1440',
   'settings.error.invalid-weburl': 'Invalid link: only http(s) or dsh:// is supported',
   'settings.error.invalid-title': 'The push title may be at most 32 characters',
+  'settings.error.invalid-id': 'That confirmation could not be recognized',
+  'settings.error.not-pending': 'That confirmation is no longer waiting',
+  'settings.error.not-ignored': 'That confirmation is not in the ignored list',
   'settings.error.unknown': 'Save failed; check the host log',
 }

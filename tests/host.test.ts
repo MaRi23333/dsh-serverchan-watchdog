@@ -6,7 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './env-isolation.ts'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
@@ -67,7 +67,7 @@ test('registered status and config handlers expose only safe fields, never stora
       await handler(req as unknown as IncomingMessage, res)
       assert.equal(status, 200, `${method} ${path}`)
       const body = JSON.parse(raw) as Record<string, unknown>
-      const expectedKeys = path.endsWith('/status') ? [...configKeys, 'pending'] : configKeys
+      const expectedKeys = path.endsWith('/status') ? [...configKeys, 'pending', 'ignored'] : configKeys
       assert.deepEqual(Object.keys(body).sort(), [...expectedKeys].sort(), `${method} ${path} whitelist`)
       assert.equal(Object.hasOwn(body, 'stateDir'), false)
       assert.equal(raw.includes(JSON.stringify(dir).slice(1, -1)), false)
@@ -341,6 +341,108 @@ test('sendPush treats non-zero server code and non-200 status as failure', async
   assert.equal(statusResult.outcome, 'terminal-failure')
 })
 
+test('SettingsStore persists dismissals across restarts without touching the credential', () => {
+  const dir = tempDir()
+  try {
+    const store = new SettingsStore(dir)
+    store.update({ sendkey: 'SCTabc123', thresholdMinutes: 8 })
+    store.ignore({
+      id: 'q:stuck',
+      kind: 'question',
+      sessionId: 'sess-1',
+      detail: '  继续吗？  ',
+      startedAt: 10,
+      ignoredAt: 20,
+    })
+    const again = new SettingsStore(dir)
+    assert.equal(again.sendkey, 'SCTabc123')
+    assert.equal(again.thresholdMinutes, 8)
+    assert.equal(again.isIgnored('q:stuck'), true)
+    assert.equal(again.ignored()[0]?.detail, '继续吗？')
+    again.update({ thresholdMinutes: 9 })
+    assert.equal(again.thresholdMinutes, 9)
+    assert.equal(again.isIgnored('q:stuck'), true)
+    const restored = again.restore('q:stuck')
+    assert.equal(restored?.id, 'q:stuck')
+    assert.equal(again.isIgnored('q:stuck'), false)
+    assert.deepEqual(again.ignored(), [])
+    const raw = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as { ignored?: unknown, thresholdMinutes?: number }
+    assert.equal(raw.ignored, undefined)
+    assert.equal(raw.thresholdMinutes, 9)
+    assert.equal(again.restore('q:stuck'), undefined)
+    assert.throws(() => again.ignore({
+      id: 'not-an-id',
+      kind: 'question',
+      sessionId: 'sess-1',
+      detail: 'x',
+      startedAt: 1,
+      ignoredAt: 2,
+    }), StoreError)
+    assert.equal(again.thresholdMinutes, 9)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SettingsStore drops malformed dismissals, caps the list, and prunes closed sessions', () => {
+  const dir = tempDir()
+  try {
+    const store = new SettingsStore(dir)
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({
+      version: 1,
+      thresholdMinutes: 6,
+      ignored: [
+        { id: 'q:ok', kind: 'question', sessionId: 's1', detail: 'hi', startedAt: 1, ignoredAt: 2 },
+        { id: 'q:ok', kind: 'question', sessionId: 's1', detail: 'newer', startedAt: 1, ignoredAt: 9 },
+        { id: 'a:bad-kind', kind: 'question', sessionId: 's1', detail: 'x', startedAt: 1, ignoredAt: 3 },
+        { id: 'nope', kind: 'approval', sessionId: 's1', detail: 'x', startedAt: 1, ignoredAt: 4 },
+        null,
+      ],
+    }))
+    const loaded = new SettingsStore(dir)
+    assert.equal(loaded.thresholdMinutes, 6)
+    assert.deepEqual(loaded.ignored().map(item => item.detail), ['newer'])
+    loaded.update({ repeatMinutes: 2 })
+    const cleaned = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as { ignored?: Array<{ id: string }> }
+    assert.deepEqual(cleaned.ignored?.map(item => item.id), ['q:ok'])
+    assert.equal(loaded.restore('q:ok')?.detail, 'newer')
+
+    for (let index = 0; index < 55; index += 1) {
+      loaded.ignore({
+        id: `q:id-${index}`,
+        kind: 'question',
+        sessionId: 's1',
+        detail: 'd',
+        startedAt: index,
+        ignoredAt: index,
+      })
+    }
+    const capped = loaded.ignored()
+    assert.equal(capped.length, 50)
+    assert.equal(capped.some(item => item.id === 'q:id-0'), false)
+    assert.equal(capped.some(item => item.id === 'q:id-4'), false)
+    assert.equal(capped.some(item => item.id === 'q:id-5'), true)
+    assert.equal(capped[0]?.id, 'q:id-54')
+
+    loaded.ignore({ id: 'q:keep', kind: 'question', sessionId: 's1', detail: 'keep', startedAt: 1, ignoredAt: 100 })
+    loaded.ignore({ id: 'q:drop', kind: 'plan-review', sessionId: 's1', detail: 'drop', startedAt: 1, ignoredAt: 101 })
+    loaded.ignore({ id: 'a:other', kind: 'approval', sessionId: 's2', detail: 'other', startedAt: 1, ignoredAt: 102 })
+    loaded.retainOpen('s1', new Set(['q:keep']))
+    assert.deepEqual(loaded.ignored().map(item => item.id).sort(), ['a:other', 'q:keep'])
+    loaded.forget('a:missing')
+    assert.equal(loaded.isIgnored('a:other'), true)
+    loaded.forget('a:other')
+    assert.deepEqual(loaded.ignored().map(item => item.id), ['q:keep'])
+    // An empty dismissal set must not rewrite the file just to prune.
+    const before = readFileSync(join(dir, 'state.json'), 'utf8')
+    loaded.retainOpen('s9', new Set())
+    loaded.forget('q:absent')
+    assert.equal(readFileSync(join(dir, 'state.json'), 'utf8'), before)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('sendPush classifies upstream 5xx as retryable but rate limits as terminal', async () => {
   const serverError = asFetch(async () => new Response('temporarily unavailable', { status: 503 }))
   const serverResult = await sendPush('https://sctapi.ftqq.com/K.send', '', 't', 'd', serverError)
@@ -353,4 +455,393 @@ test('sendPush classifies upstream 5xx as retryable but rate limits as terminal'
   const redirect = asFetch(async () => new Response('', { status: 302, headers: { location: 'https://evil.example/' } }))
   const redirectResult = await sendPush('https://sctapi.ftqq.com/K.send', '', 't', 'd', redirect)
   assert.equal(redirectResult.outcome, 'terminal-failure')
+})
+
+type RouteHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
+
+interface HostMount {
+  routes: Map<string, RouteHandler>
+  emit: (name: string, ...args: unknown[]) => void
+  cleanup: () => void
+}
+
+function mountHost(stateDir: string): HostMount {
+  const routes = new Map<string, RouteHandler>()
+  const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
+  const cleanups: Array<() => void> = []
+  const ctx = {
+    logger: () => ({ info() {}, warn() {} }),
+    on(name: string, fn: (...args: unknown[]) => void) {
+      const list = listeners.get(name) ?? []
+      list.push(fn)
+      listeners.set(name, list)
+    },
+    get() { return undefined },
+    effect(callback: () => void | (() => void)) {
+      const cleanup = callback()
+      if (typeof cleanup === 'function') cleanups.push(cleanup)
+    },
+    inject(_services: string[], callback: (context: unknown) => void) { callback(ctx) },
+    webServer: {
+      register(route: { path: string, handler: RouteHandler }) {
+        routes.set(route.path, route.handler)
+        return () => { routes.delete(route.path) }
+      },
+    },
+  }
+  apply(ctx as unknown as Parameters<typeof apply>[0], { stateDir })
+  return {
+    routes,
+    emit(name, ...args) {
+      for (const fn of listeners.get(name) ?? []) fn(...args)
+    },
+    cleanup() {
+      for (const fn of cleanups.splice(0).reverse()) fn()
+    },
+  }
+}
+
+async function callRoute(
+  routes: Map<string, RouteHandler>,
+  path: string,
+  method: string,
+  body?: string,
+  remoteAddress = '127.0.0.1',
+): Promise<{ status: number, json: Record<string, unknown> }> {
+  const handler = routes.get(path)
+  assert.ok(handler, path)
+  const req = Readable.from(body === undefined ? [] : [Buffer.from(body)])
+  Object.assign(req, {
+    method,
+    socket: { remoteAddress },
+    headers: {
+      host: '127.0.0.1:3080',
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+  })
+  let status = 0
+  let raw = ''
+  const res = {
+    writeHead(code: number) { status = code },
+    end(payload?: string) { raw = payload ?? '' },
+  } as unknown as ServerResponse
+  await handler(req as unknown as IncomingMessage, res)
+  return { status, json: raw === '' ? {} : JSON.parse(raw) as Record<string, unknown> }
+}
+
+function idsOf(value: unknown): string[] {
+  assert.ok(Array.isArray(value))
+  return value.map(item => {
+    assert.equal(typeof item, 'object')
+    assert.ok(item !== null)
+    const id = (item as { id?: unknown }).id
+    assert.equal(typeof id, 'string')
+    return id as string
+  })
+}
+
+const flushTimers = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
+
+test('an ignored confirmation is not re-armed after restart and can be restored', async () => {
+  const dir = tempDir()
+  const mounts: HostMount[] = []
+  const startedAt = Date.now() - 100 * 60 * 60 * 1000
+  const openCall = {
+    type: 'tool/call',
+    time: startedAt,
+    data: {
+      callId: 'stuck-call',
+      name: 'ask_user_question',
+      arguments: JSON.stringify({ questions: [{ question: '还在等我吗？' }] }),
+    },
+  }
+  let events: Array<Record<string, unknown>> = [openCall]
+  const session = { id: 'sess-stuck', snapshotEvents: () => events }
+  try {
+    const first = mountHost(dir)
+    mounts.push(first)
+    first.emit('session/created', session)
+    let status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
+    assert.equal(status.status, 200)
+    assert.deepEqual(idsOf(status.json['pending']), ['q:stuck-call'])
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+
+    const ignored = await callRoute(
+      first.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'q:stuck-call' }),
+    )
+    assert.equal(ignored.status, 200)
+    assert.deepEqual(idsOf(ignored.json['pending']), [])
+    assert.deepEqual(idsOf(ignored.json['ignored']), ['q:stuck-call'])
+    const ignoredRow = (ignored.json['ignored'] as Array<{ detail?: unknown, startedAt?: unknown }>)[0]
+    assert.equal(ignoredRow?.detail, '还在等我吗？')
+    assert.equal(ignoredRow?.startedAt, startedAt)
+    assert.equal(JSON.stringify(ignored.json).includes(dir), false)
+
+    const saved = await callRoute(
+      first.routes,
+      '/serverchan-watchdog/config',
+      'POST',
+      JSON.stringify({ thresholdMinutes: 9 }),
+    )
+    assert.equal(saved.status, 200)
+    assert.equal(saved.json['thresholdMinutes'], 9)
+    assert.equal(Object.hasOwn(saved.json, 'ignored'), false)
+    assert.equal(new SettingsStore(dir).isIgnored('q:stuck-call'), true)
+    assert.ok(readFileSync(join(dir, 'state.json'), 'utf8').includes('q:stuck-call'))
+
+    await flushTimers()
+    status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+
+    // Shutdown disposes the session but must keep the dismissal on disk.
+    first.emit('session/disposed', session)
+    assert.equal(new SettingsStore(dir).isIgnored('q:stuck-call'), true)
+    first.cleanup()
+
+    const second = mountHost(dir)
+    mounts.push(second)
+    second.emit('session/created', session)
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), ['q:stuck-call'])
+    assert.equal((status.json['ignored'] as Array<{ startedAt?: unknown }>)[0]?.startedAt, startedAt)
+
+    // A failed or empty log read must not wipe the dismissal.
+    events = []
+    second.emit('session/created', session)
+    second.emit('session/created', { id: 'sess-stuck', snapshotEvents: () => { throw new Error('boom') } })
+    assert.equal(new SettingsStore(dir).isIgnored('q:stuck-call'), true)
+
+    const restored = await callRoute(
+      second.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'q:stuck-call', restore: true }),
+    )
+    assert.equal(restored.status, 200)
+    assert.deepEqual(idsOf(restored.json['ignored']), [])
+    assert.deepEqual(idsOf(restored.json['pending']), ['q:stuck-call'])
+    assert.equal((restored.json['pending'] as Array<{ startedAt?: unknown }>)[0]?.startedAt, startedAt)
+
+    second.emit('session/event', session, {
+      type: 'tool/result',
+      data: { message: { source: { kind: 'tool', callId: 'stuck-call' } } },
+    })
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+
+    // The pair can be dismissed again, then a later boot whose log shows it
+    // closed drops the record instead of reminding.
+    second.emit('session/event', session, openCall)
+    const dismissedAgain = await callRoute(
+      second.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'q:stuck-call' }),
+    )
+    assert.equal(dismissedAgain.status, 200)
+    second.cleanup()
+
+    events = [
+      openCall,
+      {
+        type: 'tool/result',
+        time: startedAt + 1,
+        data: { message: { source: { kind: 'tool', callId: 'stuck-call' } } },
+      },
+    ]
+    const third = mountHost(dir)
+    mounts.push(third)
+    third.emit('session/created', session)
+    status = await callRoute(third.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+    await flushTimers()
+  } finally {
+    for (const mount of mounts.reverse()) mount.cleanup()
+    await flushTimers()
+    assert.equal(dirname(resolve(dir)), resolve(tmpdir()))
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('ignoring a question leaves the FIFO fallback, and a replay does not re-arm it', async () => {
+  const dir = tempDir()
+  const mount = mountHost(dir)
+  const session = { id: 'sess-live', snapshotEvents: () => [] as unknown[] }
+  const ask = (callId: string, question: string): void => {
+    mount.emit('session/event', session, {
+      type: 'tool/call',
+      data: {
+        callId,
+        name: 'ask_user_question',
+        arguments: JSON.stringify({ questions: [{ question }] }),
+      },
+    })
+  }
+  try {
+    mount.emit('session/created', session)
+    ask('A', '先回答这个')
+    ask('B', '再回答这个')
+    let status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['q:A', 'q:B'])
+
+    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:A' }))
+    assert.equal(ignored.status, 200)
+    assert.deepEqual(idsOf(ignored.json['pending']), ['q:B'])
+    assert.deepEqual(idsOf(ignored.json['ignored']), ['q:A'])
+
+    ask('A', '先回答这个')
+    mount.emit('session/event', session, { type: 'tool/result', data: { message: {} } })
+    status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), ['q:A'])
+
+    mount.emit('session/event', session, {
+      type: 'tool/result',
+      data: { message: { source: { kind: 'tool', callId: 'A' } } },
+    })
+    status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+    await flushTimers()
+  } finally {
+    mount.cleanup()
+    await flushTimers()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an ignored approval stays dismissed across restart until it is decided', async () => {
+  const dir = tempDir()
+  const mounts: HostMount[] = []
+  const startedAt = 1_700_000_000_000
+  const session = {
+    id: 'sess-ap',
+    snapshotEvents: () => [{
+      type: 'approval/asked',
+      time: startedAt,
+      data: { id: 'ap-1', toolName: 'bash', reason: '跑一下命令' },
+    }],
+  }
+  try {
+    const first = mountHost(dir)
+    mounts.push(first)
+    first.emit('session/created', session)
+    let status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['a:ap-1'])
+    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'a:ap-1' }))
+    assert.equal(ignored.status, 200)
+    assert.deepEqual(idsOf(ignored.json['pending']), [])
+    assert.equal((ignored.json['ignored'] as Array<{ kind?: unknown }>)[0]?.kind, 'approval')
+    first.cleanup()
+
+    const second = mountHost(dir)
+    mounts.push(second)
+    second.emit('session/created', session)
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), ['a:ap-1'])
+
+    const restored = await callRoute(
+      second.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'a:ap-1', restore: true }),
+    )
+    assert.deepEqual(idsOf(restored.json['pending']), ['a:ap-1'])
+    assert.deepEqual(idsOf(restored.json['ignored']), [])
+    second.emit('session/event', session, { type: 'approval/decided', data: { id: 'ap-1' } })
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+    await flushTimers()
+  } finally {
+    for (const mount of mounts.reverse()) mount.cleanup()
+    await flushTimers()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('restoring after the session is gone drops the dismissal without starting a reminder', async () => {
+  const dir = tempDir()
+  const mount = mountHost(dir)
+  const startedAt = Date.now() - 60 * 60 * 1000
+  const session = {
+    id: 'sess-gone',
+    snapshotEvents: () => [{
+      type: 'tool/call',
+      time: startedAt,
+      data: {
+        callId: 'gone',
+        name: 'ask_user_question',
+        arguments: JSON.stringify({ questions: [{ question: '已经结束了' }] }),
+      },
+    }],
+  }
+  try {
+    mount.emit('session/created', session)
+    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:gone' }))
+    assert.equal(ignored.status, 200)
+    mount.emit('session/disposed', session)
+    assert.equal(new SettingsStore(dir).isIgnored('q:gone'), true)
+    const restored = await callRoute(
+      mount.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'q:gone', restore: true }),
+    )
+    assert.equal(restored.status, 200)
+    assert.deepEqual(idsOf(restored.json['pending']), [])
+    assert.deepEqual(idsOf(restored.json['ignored']), [])
+    await flushTimers()
+    const status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), [])
+    assert.equal(new SettingsStore(dir).isIgnored('q:gone'), false)
+  } finally {
+    mount.cleanup()
+    await flushTimers()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the ignore route rejects bad ids, unknown rows, and non-loopback peers', async () => {
+  const dir = tempDir()
+  const mount = mountHost(dir)
+  try {
+    const missing = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:missing' }))
+    assert.equal(missing.status, 404)
+    assert.equal(missing.json['error'], 'not-pending')
+
+    const bad = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:bad\nid' }))
+    assert.equal(bad.status, 400)
+    assert.equal(bad.json['error'], 'invalid-id')
+
+    const restore = await callRoute(
+      mount.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'q:missing', restore: true }),
+    )
+    assert.equal(restore.status, 404)
+    assert.equal(restore.json['error'], 'not-ignored')
+
+    const remote = await callRoute(
+      mount.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'q:missing' }),
+      '192.168.1.5',
+    )
+    assert.equal(remote.status, 403)
+
+    const method = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'GET')
+    assert.equal(method.status, 405)
+  } finally {
+    mount.cleanup()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

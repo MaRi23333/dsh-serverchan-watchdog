@@ -4,6 +4,7 @@
  * One settings section (`settings.section`): ServerChan credential
  * (SendKey or full push URL, encrypted on the host), threshold / repeat
  * minutes, optional proxy, a one-click test push, and the live pending list.
+ * Stuck rows can be ignored; that dismissal is stored on the host.
  * All detection and pushing stays on the host; the browser only reads and
  * edits the host-managed settings.
  */
@@ -12,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { WatchdogSettings, type WatchdogSettingsInjected } from './SettingsCard.tsx'
 import { en, zh } from './locales.ts'
-import { fetchConfig, fetchStatus, saveConfig, sendTest } from './api.ts'
+import { fetchConfig, fetchStatus, postPendingAction, saveConfig, sendTest } from './api.ts'
 import { decorateSettingsNavIcon } from './nav-icon.ts'
 
 const NS = 'serverchan-watchdog'
@@ -40,6 +41,8 @@ export function apply(ctx: ClientContext): void {
         config: () => fetchConfig(),
         status: () => fetchStatus(),
         saveConfig: patch => saveConfig(patch),
+        ignorePending: id => postPendingAction(id, false),
+        restorePending: id => postPendingAction(id, true),
         test: () => sendTest(),
       }),
     }, WatchdogSettings)
