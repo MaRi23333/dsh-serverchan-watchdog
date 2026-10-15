@@ -146,7 +146,7 @@ test('the section registers with an id, order, label, and injectable face', () =
   assert.equal(typeof options['label'], 'function')
 
   const face = injected as Record<string, unknown>
-  for (const key of ['t', 'config', 'status', 'saveConfig', 'test']) {
+  for (const key of ['t', 'config', 'status', 'saveConfig', 'ignorePending', 'restorePending', 'test']) {
     assert.equal(typeof face[key], 'function', `injected face is missing ${key}`)
   }
 })

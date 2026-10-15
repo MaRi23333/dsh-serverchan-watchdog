@@ -13,14 +13,18 @@
  *    is stored, and an empty field means "keep the stored key".
  *  - The pending list polls the host every 10 s and keeps its own timers so the
  *    wait times stay live between polls.
+ *  - Ignoring a row is immediate (not part of the settings draft). The host
+ *    stores it, so a restart does not remind again; restoring puts it back.
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Button, Input, Switch, Tag, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './settings.module.css'
+import { interactionKey } from '../core.ts'
 import type {
   WatchdogConfigView,
   WatchdogPatch,
+  WatchdogIgnoredView,
   WatchdogPendingView,
   WatchdogStatus,
   WatchdogTestResult,
@@ -38,6 +42,8 @@ export interface WatchdogSettingsInjected {
   config: () => Promise<WatchdogConfigView>
   status: () => Promise<WatchdogStatus>
   saveConfig: (patch: WatchdogPatch) => Promise<WatchdogConfigView>
+  ignorePending: (sessionId: string, id: string) => Promise<WatchdogStatus>
+  restorePending: (sessionId: string, id: string) => Promise<WatchdogStatus>
   test: () => Promise<WatchdogTestResult>
 }
 
@@ -66,6 +72,10 @@ const ERROR_KEYS: Record<string, WatchdogKey> = {
   'invalid-minutes': 'settings.error.invalid-minutes',
   'invalid-weburl': 'settings.error.invalid-weburl',
   'invalid-title': 'settings.error.invalid-title',
+  'invalid-id': 'settings.error.invalid-id',
+  'not-pending': 'settings.error.not-pending',
+  'not-ignored': 'settings.error.not-ignored',
+  'ignored-full': 'settings.error.ignored-full',
 }
 
 function draftOf(view: WatchdogConfigView): Draft {
@@ -109,9 +119,11 @@ export function WatchdogSettings(props: {
   config: WatchdogSettingsInjected['config']
   status: WatchdogSettingsInjected['status']
   saveConfig: WatchdogSettingsInjected['saveConfig']
+  ignorePending: WatchdogSettingsInjected['ignorePending']
+  restorePending: WatchdogSettingsInjected['restorePending']
   test: WatchdogSettingsInjected['test']
 }) {
-  const { t, config, status, saveConfig, test } = props
+  const { t, config, status, saveConfig, ignorePending, restorePending, test } = props
 
   const [loaded, setLoaded] = useState<WatchdogConfigView | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -119,6 +131,10 @@ export function WatchdogSettings(props: {
   const [hasStoredKey, setHasStoredKey] = useState(false)
   const [credentialConfigured, setCredentialConfigured] = useState(false)
   const [pending, setPending] = useState<readonly WatchdogPendingView[]>([])
+  const [ignored, setIgnored] = useState<readonly WatchdogIgnoredView[]>([])
+  /** Session/id key of the dismissal/restore currently talking to the host, if any. */
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const [pendingActionError, setPendingActionError] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -130,9 +146,16 @@ export function WatchdogSettings(props: {
   void tick
 
   const alive = useRef(true)
+  /** Bumped when a dismissal starts so an in-flight poll cannot restore a stale list. */
+  const listEpoch = useRef(0)
   useEffect(() => {
     alive.current = true
     return () => { alive.current = false }
+  }, [])
+
+  const applyLists = useCallback((result: WatchdogStatus): void => {
+    setPending(Array.isArray(result.pending) ? result.pending : [])
+    setIgnored(Array.isArray(result.ignored) ? result.ignored : [])
   }, [])
 
   const adopt = useCallback((view: WatchdogConfigView) => {
@@ -165,11 +188,12 @@ export function WatchdogSettings(props: {
     let cancelled = false
     let timer: number | undefined
     const refresh = (): void => {
+      const ticket = listEpoch.current
       void status().then((result) => {
-        if (cancelled || !alive.current) return
-        // Only the pending list is taken from the poll: the form keeps its own
+        if (cancelled || !alive.current || ticket !== listEpoch.current) return
+        // Only the lists are taken from the poll: the form keeps its own
         // draft, which a background refresh must never overwrite.
-        if (result.ok) setPending(Array.isArray(result.pending) ? result.pending : [])
+        if (result.ok) applyLists(result)
       })
     }
     refresh()
@@ -178,14 +202,33 @@ export function WatchdogSettings(props: {
       cancelled = true
       if (timer !== undefined) window.clearInterval(timer)
     }
-  }, [status])
+  }, [status, applyLists])
 
-  // Live wait-time ticker for the pending rows.
+  // Live wait-time ticker for the pending and ignored rows.
   useEffect(() => {
-    if (pending.length === 0) return
+    if (pending.length === 0 && ignored.length === 0) return
     const timer = window.setInterval(() => { bumpTick() }, 1000)
     return () => { window.clearInterval(timer) }
-  }, [pending.length])
+  }, [pending.length, ignored.length])
+
+  const runPendingAction = (item: Pick<WatchdogPendingView, 'sessionId' | 'id'>, action: WatchdogSettingsInjected['ignorePending']): void => {
+    if (pendingAction !== null || saving) return
+    const ticket = ++listEpoch.current
+    setPendingAction(interactionKey(item.sessionId, item.id))
+    setPendingActionError(null)
+    void action(item.sessionId, item.id).then((result) => {
+      if (!alive.current || ticket !== listEpoch.current) return
+      // Drop polls that started while this request was in flight.
+      listEpoch.current += 1
+      setPendingAction(null)
+      if (!result.ok) {
+        const code = result.error ?? ''
+        setPendingActionError(t(ERROR_KEYS[code] ?? 'settings.pending.actionFailed'))
+        return
+      }
+      applyLists(result)
+    })
+  }
 
   const dirty = useMemo(() => {
     if (loaded === null || draft === null) return false
@@ -207,7 +250,7 @@ export function WatchdogSettings(props: {
   const invalid = thresholdInvalid || repeatInvalid || titleInvalid
 
   const onSave = (): void => {
-    if (saving || draft === null || invalid) return
+    if (saving || pendingAction !== null || draft === null || invalid) return
     setSaving(true)
     setSaveError(null)
     setSavedAt(null)
@@ -236,7 +279,7 @@ export function WatchdogSettings(props: {
   }
 
   const onClearKey = (): void => {
-    if (saving) return
+    if (saving || pendingAction !== null) return
     setSaving(true)
     setSaveError(null)
     setSavedAt(null)
@@ -327,6 +370,9 @@ export function WatchdogSettings(props: {
         {pending.length > 0 && (
           <Tag tone="info">{t('settings.status.pendingCount', { count: pending.length })}</Tag>
         )}
+        {ignored.length > 0 && (
+          <Tag tone="neutral">{t('settings.status.ignoredCount', { count: ignored.length })}</Tag>
+        )}
       </div>
 
       <section className={css.card}>
@@ -354,7 +400,7 @@ export function WatchdogSettings(props: {
               <Button
                 size="sm"
                 variant="outline"
-                disabled={saving}
+                disabled={saving || pendingAction !== null}
                 onClick={onClearKey}
               >
                 {t('settings.credential.clear')}
@@ -498,26 +544,87 @@ export function WatchdogSettings(props: {
           <h3 className={css.cardTitle}>{t('settings.card.pending')}</h3>
           <span className={css.cardNote}>{t('settings.card.pending.note')}</span>
         </div>
-        {pending.length === 0
+        {pending.length === 0 && ignored.length === 0
           ? <div className={css.pendingEmpty}>{t('settings.pending.empty')}</div>
           : (
-            <ul className={css.pendingList}>
-              {pending.map(item => (
-                <li key={item.id} className={css.pendingItem}>
-                  <span className={css.kind}>{t(KINDS[item.kind] ?? 'settings.kind.question')}</span>
-                  <div className={css.pendingBody}>
-                    <span className={css.pendingDetail}>{item.detail}</span>
-                    <span className={css.pendingMeta}>
-                      {t('settings.pending.waiting', { wait: formatElapsed(Date.now() - item.startedAt, t) })}
-                      {item.pushes > 0
-                        ? ` · ${t('settings.pending.pushes', { count: item.pushes })}`
-                        : ''}
-                    </span>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <div className={css.pendingGroups}>
+              {pending.length === 0
+                ? <div className={css.pendingEmpty}>{t('settings.pending.empty')}</div>
+                : (
+                  <>
+                    <p className={css.hint}>{t('settings.pending.ignoreHint')}</p>
+                    <ul className={css.pendingList}>
+                      {pending.map(item => {
+                        const key = interactionKey(item.sessionId, item.id)
+                        const acting = pendingAction === key
+                        return (
+                          <li key={key} className={css.pendingItem}>
+                            <span className={css.kind}>{t(KINDS[item.kind] ?? 'settings.kind.question')}</span>
+                            <div className={css.pendingBody}>
+                              <span className={css.pendingDetail}>{item.detail}</span>
+                              <span className={css.pendingMeta}>
+                                {t('settings.pending.waiting', { wait: formatElapsed(Date.now() - item.startedAt, t) })}
+                                {item.pushes > 0
+                                  ? ` · ${t('settings.pending.pushes', { count: item.pushes })}`
+                                  : ''}
+                              </span>
+                            </div>
+                            <div className={css.pendingActions}>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={saving || pendingAction !== null}
+                                aria-label={t('settings.pending.ignoreLabel', { detail: item.detail })}
+                                onClick={() => { runPendingAction(item, ignorePending) }}
+                              >
+                                {acting ? t('settings.pending.ignoring') : t('settings.pending.ignore')}
+                              </Button>
+                            </div>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </>
+                )}
+              {ignored.length > 0 && (
+                <>
+                  <h4 className={css.groupLabel}>{t('settings.pending.ignoredHeading')}</h4>
+                  <p className={css.hint}>{t('settings.pending.ignoredHint')}</p>
+                  <ul className={css.pendingList}>
+                    {ignored.map(item => {
+                      const key = interactionKey(item.sessionId, item.id)
+                      const acting = pendingAction === key
+                      return (
+                        <li key={key} className={css.pendingItem}>
+                          <span className={css.kind}>{t(KINDS[item.kind] ?? 'settings.kind.question')}</span>
+                          <div className={css.pendingBody}>
+                            <span className={css.pendingDetail}>{item.detail}</span>
+                            <span className={css.pendingMeta}>
+                              {t('settings.pending.waiting', { wait: formatElapsed(Date.now() - item.startedAt, t) })}
+                            </span>
+                          </div>
+                          <div className={css.pendingActions}>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={saving || pendingAction !== null}
+                              aria-label={t('settings.pending.restoreLabel', { detail: item.detail })}
+                              onClick={() => { runPendingAction(item, restorePending) }}
+                            >
+                              {acting ? t('settings.pending.restoring') : t('settings.pending.restore')}
+                            </Button>
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </>
+              )}
+            </div>
           )}
+        {pendingActionError !== null && (
+          <p className={clsx(css.feedback, css.feedbackError)} role="alert">{pendingActionError}</p>
+        )}
       </section>
 
       <div className={clsx(css.actions, css.actionsEnd)}>
@@ -542,19 +649,19 @@ export function WatchdogSettings(props: {
         <Button
           size="sm"
           variant="outline"
-          disabled={testing || saving || !credentialConfigured}
+          disabled={testing || saving || pendingAction !== null || !credentialConfigured}
           title={credentialConfigured ? undefined : t('settings.test.needKey')}
           onClick={onTest}
         >
           {testing ? t('settings.test.sending') : t('settings.test')}
         </Button>
-        <Button size="sm" variant="ghost" disabled={!dirty || saving} onClick={onReset}>
+        <Button size="sm" variant="ghost" disabled={!dirty || saving || pendingAction !== null} onClick={onReset}>
           {t('settings.reset')}
         </Button>
         <Button
           variant="primary"
           size="sm"
-          disabled={!dirty || invalid || saving}
+          disabled={!dirty || invalid || saving || pendingAction !== null}
           onClick={onSave}
         >
           {saving ? t('settings.saving') : t('settings.save')}

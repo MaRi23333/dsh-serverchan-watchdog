@@ -10,7 +10,7 @@ export type PendingKind = 'question' | 'plan-review' | 'approval'
 
 /** One pending human interaction being watched. */
 export interface PendingInteraction {
-  /** Registry identity: `q:<callId>` for questions, `a:<approvalId>` for approvals. */
+  /** Session-local identity: `q:<callId>` for questions, `a:<approvalId>` for approvals. */
   id: string
   kind: PendingKind
   /** Session id carrying the pending ask. */
@@ -21,6 +21,11 @@ export interface PendingInteraction {
   startedAt: number
   /** How many times a reminder was pushed so far. */
   pushes: number
+}
+
+/** Unambiguous internal key for an interaction id within its session. */
+export function interactionKey(sessionId: string, id: string): string {
+  return JSON.stringify([sessionId, id])
 }
 
 /** Outcome of one reminder attempt. */
@@ -55,7 +60,7 @@ interface Entry {
 
 /**
  * Tracks pending human interactions with threshold/repeat timers.
- * `stop()` cancels everything; a fire that settles after `stop()` is a no-op.
+ * `stop()` cancels one session's interaction; a fire settling after it is a no-op.
  */
 export class PendingTracker {
   private readonly entries = new Map<string, Entry>()
@@ -86,40 +91,44 @@ export class PendingTracker {
   }
 
   /**
-   * Begin watching one interaction. A repeat start for the same id is a no-op.
+   * Begin watching one interaction. A repeat start for the same session/id is a no-op.
    * @param entry - identity, kind, session, and display text; startedAt/pushes are filled here.
    */
   start(entry: Omit<PendingInteraction, 'startedAt' | 'pushes'> & Partial<Pick<PendingInteraction, 'startedAt'>>): void {
-    if (this.entries.has(entry.id)) return
+    const key = interactionKey(entry.sessionId, entry.id)
+    if (this.entries.has(key)) return
     const now = this.now()
     const startedAt = entry.startedAt ?? now
     const pending: PendingInteraction = { ...entry, detail: truncate(entry.detail, 500), startedAt, pushes: 0 }
     const elapsed = Math.max(0, now - startedAt)
     const delay = Math.max(0, this.thresholdMs() - elapsed)
     const timer = this.after(delay, () => { void this.fire(pending) })
-    this.entries.set(entry.id, { pending, timer, repeat: undefined, retries: 0 })
+    this.entries.set(key, { pending, timer, repeat: undefined, retries: 0 })
   }
 
   /**
    * Stop watching one interaction and cancel any scheduled repeat.
-   * @param id - the exact identity passed to {@link start}.
+   * @param sessionId - the session passed to {@link start}.
+   * @param id - the exact identity passed to {@link start} in that session.
    */
-  stop(id: string): void {
-    const entry = this.entries.get(id)
+  stop(sessionId: string, id: string): void {
+    const key = interactionKey(sessionId, id)
+    const entry = this.entries.get(key)
     if (entry === undefined) return
     this.cancel(entry.timer)
     if (entry.repeat !== undefined) this.cancel(entry.repeat)
-    this.entries.delete(id)
+    this.entries.delete(key)
   }
 
   /**
    * Whether one interaction is still being watched. A fire callback should
    * re-check this right before publishing, so a `stop()` that lands while the
    * callback awaits (e.g. an HTTP push in flight) cannot send a stale notice.
-   * @param id - the identity passed to {@link start}.
+   * @param sessionId - the session passed to {@link start}.
+   * @param id - the identity passed to {@link start} in that session.
    */
-  has(id: string): boolean {
-    return this.entries.has(id)
+  has(sessionId: string, id: string): boolean {
+    return this.entries.has(interactionKey(sessionId, id))
   }
 
   /** Snapshot of the active interactions. */
@@ -132,19 +141,19 @@ export class PendingTracker {
    * @param match - predicate over the pending entry.
    */
   stopWhere(match: (pending: PendingInteraction) => boolean): void {
-    for (const id of [...this.entries.keys()]) {
-      const entry = this.entries.get(id)
-      if (entry !== undefined && match(entry.pending)) this.stop(id)
+    for (const { pending } of [...this.entries.values()]) {
+      if (match(pending)) this.stop(pending.sessionId, pending.id)
     }
   }
 
   /** Stop every watched interaction (plugin teardown). */
   dispose(): void {
-    for (const id of [...this.entries.keys()]) this.stop(id)
+    this.stopWhere(() => true)
   }
 
   private async fire(pending: PendingInteraction): Promise<void> {
-    const entry = this.entries.get(pending.id)
+    const key = interactionKey(pending.sessionId, pending.id)
+    const entry = this.entries.get(key)
     if (entry === undefined) return
     entry.repeat = undefined
     let outcome: FireOutcome = 'delivered'
@@ -160,7 +169,7 @@ export class PendingTracker {
     } catch {
       outcome = 'retryable-failure'
     }
-    if (this.entries.get(pending.id) !== entry) return
+    if (this.entries.get(key) !== entry) return
     if (outcome === 'delivered') {
       pending.pushes += 1
       entry.retries = 0
@@ -178,12 +187,12 @@ export class PendingTracker {
         entry.retries += 1
         entry.repeat = this.after(this.retryMs(), () => { void this.fire(pending) })
       } else {
-        this.entries.delete(pending.id)
+        this.entries.delete(key)
       }
       return
     }
     // A terminal upstream response must not cause another quota-consuming call.
-    this.entries.delete(pending.id)
+    this.entries.delete(key)
   }
 }
 
@@ -345,25 +354,55 @@ export interface PendingSeed {
  * Includes:
  *  - `tool/call` of `ask_user_question` / `exit_plan_mode` without a matching
  *    `tool/result` (paired by `message.source.callId`);
+ *  - the same calls consumed by a `tool/result` that carries no call id,
+ *    in FIFO order, matching the live session handler;
  *  - `approval/asked` without a matching `approval/decided` (paired by id).
  *
  * An unanswered ask is by definition not yet answered, so an unclosed pair
  * here is the ask still waiting — with one caveat: if the host died between
- * the human answering and the result being appended, this re-arms a watch on
- * an already-answered ask (harmless: no answer can be expected, the reminder
- * fires and the next session pass closes the pair).
+ * the human answering and the result being appended, the pair is still open
+ * even though the human already answered. Callers that re-arm these seeds
+ * should honor a durable ignore list so a stuck row can be dismissed.
+ * A callId-less result already in the log is not that caveat: it closed the
+ * oldest open question, and that question must not come back as a seed.
+ * A replayed `tool/call` with the same callId is one open ask, not two: the
+ * first copy is kept, and closing that id drops every copy.
  *
  * @param events - the session's events in log order.
  * @param sessionId - session identity for the seeds.
  * @returns seeds to start, in log order.
  */
+/**
+ * Call id on a `tool/result`, or undefined when the live handler falls through
+ * to the question FIFO. A non-string call id is treated as missing so recovery
+ * and the live path agree on which results are anonymous.
+ */
+function toolResultCallId(data: Record<string, unknown>): string | undefined {
+  const message = data['message'] as { source?: { kind?: unknown; callId?: unknown } } | undefined
+  const source = message?.source
+  if (source?.kind !== 'tool') return undefined
+  return typeof source.callId === 'string' ? source.callId : undefined
+}
+
 export function recoverPending(
   events: readonly SessionEventView[],
   sessionId: string,
 ): PendingSeed[] {
-  const seeds: PendingSeed[] = []
-  const seenQuestions = new Set<string>()
-  const seenApprovals = new Set<string>()
+  /** Still-open seeds in log order. Question calls are the FIFO; approvals sit among them and are never shifted by an anonymous result. */
+  const open: PendingSeed[] = []
+  const closedQuestions = new Set<string>()
+  const closedApprovals = new Set<string>()
+
+  const closeQuestion = (callId: string): void => {
+    closedQuestions.add(callId)
+    // A replay may have appended the same call more than once. Closing it
+    // drops every copy; leaving one would look still pending.
+    for (let index = open.length - 1; index >= 0; index -= 1) {
+      const seed = open[index]
+      if (seed !== undefined && seed.kind !== 'approval' && seed.id === `q:${callId}`) open.splice(index, 1)
+    }
+  }
+
   for (const event of events) {
     const data = event.data
     if (event.type === 'tool/call') {
@@ -371,8 +410,11 @@ export function recoverPending(
       if (name !== 'ask_user_question' && name !== 'exit_plan_mode') continue
       const callId = data['callId']
       if (typeof callId !== 'string') continue
-      if (seenQuestions.has(callId)) continue
-      seeds.push({
+      if (closedQuestions.has(callId)) continue
+      // Same call replayed before its result is still one open ask. Keep the
+      // first copy so a single result cannot leave a duplicate seed behind.
+      if (open.some(seed => seed.id === `q:${callId}`)) continue
+      open.push({
         id: `q:${callId}`,
         kind: name === 'exit_plan_mode' ? 'plan-review' : 'question',
         sessionId,
@@ -383,15 +425,26 @@ export function recoverPending(
         startedAt: event.time ?? Date.now(),
       })
     } else if (event.type === 'tool/result') {
-      const message = data['message'] as { source?: { kind?: string; callId?: string } } | undefined
-      const callId = message?.source?.kind === 'tool' ? message.source.callId : undefined
-      if (callId === undefined) continue
-      seenQuestions.add(callId)
+      const callId = toolResultCallId(data)
+      if (callId !== undefined) {
+        // Same as the live path: an identified result closes that call even
+        // when it is not the FIFO head, and a result seen before its call
+        // keeps the later call from being re-opened.
+        closeQuestion(callId)
+        continue
+      }
+      // No call id. The live handler shifts the oldest open question,
+      // including an ignored placeholder. Do that here so recovery does not
+      // rebuild a tombstone for a question this result already answered.
+      const index = open.findIndex(seed => seed.kind !== 'approval')
+      const consumed = index >= 0 ? open[index] : undefined
+      if (consumed !== undefined) closeQuestion(consumed.id.slice(2))
     } else if (event.type === 'approval/asked') {
       const id = data['id']
       if (typeof id !== 'string') continue
-      if (seenApprovals.has(id)) continue
-      seeds.push({
+      if (closedApprovals.has(id)) continue
+      if (open.some(seed => seed.id === `a:${id}`)) continue
+      open.push({
         id: `a:${id}`,
         kind: 'approval',
         sessionId,
@@ -402,12 +455,12 @@ export function recoverPending(
       })
     } else if (event.type === 'approval/decided') {
       const id = data['id']
-      if (typeof id === 'string') seenApprovals.add(id)
+      if (typeof id !== 'string') continue
+      closedApprovals.add(id)
+      for (let index = open.length - 1; index >= 0; index -= 1) {
+        if (open[index]?.id === `a:${id}`) open.splice(index, 1)
+      }
     }
   }
-  // Fold again, dropping every seed whose pair closed later than its opening
-  // (a result/decided may appear after the call in a crash-tail or replay).
-  return seeds.filter(seed => (
-    seed.kind === 'approval' ? !seenApprovals.has(seed.id.slice(2)) : !seenQuestions.has(seed.id.slice(2))
-  ))
+  return open
 }

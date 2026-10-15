@@ -14,9 +14,10 @@
  * regardless of mux subscribers, and approval/decided answers end the watch.
  *
  * Routes (loopback-only; write routes also require JSON + loopback Origin):
- *   GET  /serverchan-watchdog/status  effective config summary + active pending list
+ *   GET  /serverchan-watchdog/status  effective config summary + active pending and ignored lists
  *   GET  /serverchan-watchdog/config  editable settings view (never the key)
  *   POST /serverchan-watchdog/config  { sendkey?, clearKey?, thresholdMinutes?, repeatMinutes?, proxy? }
+ *   POST /serverchan-watchdog/ignore  { sessionId, id, restore? } dismiss or restore one pending confirmation
  *   POST /serverchan-watchdog/test    send one test push with current settings
  *
  * The SendKey is encrypted with AES-256-GCM under a per-machine key file in
@@ -41,7 +42,7 @@ import { fetch as undiciFetch, ProxyAgent } from 'undici'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-session'
-import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, minutesValue, readSessionLog, recoverPending, truncate, type FireOutcome, type PendingInteraction, type PendingKind, type PendingSeed } from './core.ts'
+import { PendingTracker, buildPushUrl, describeExitPlanCall, describeQuestionCall, interactionKey, minutesValue, readSessionLog, recoverPending, truncate, type FireOutcome, type PendingInteraction, type PendingKind, type PendingSeed, type SessionEventView } from './core.ts'
 
 export const name = 'serverchan-watchdog'
 
@@ -89,6 +90,29 @@ const DEFAULT_TITLE = 'DSH 等待人工确认'
 const TITLE_MAX = 32
 /** Title budget left for the user's own words once `（第 N 次）` is appended. */
 const TITLE_BASE_MAX = 20
+/**
+ * New dismissals are refused once this many are already stored. Existing
+ * records are never dropped to make room: the tracker was already stopped
+ * for each of them, so evicting one would leave it unmonitored until the
+ * next boot re-armed it. The settings copy states this same limit.
+ */
+const IGNORED_LIMIT = 50
+/** Tracker ids are `q:<callId>` / `a:<approvalId>`; reject anything that cannot be one. */
+const PENDING_ID_MAX = 512
+const SESSION_ID_MAX = 1024
+
+/** One confirmation the settings page dismissed. Survives restarts in state.json. */
+export interface IgnoredInteraction {
+  /** Same session-local identity the tracker uses (`q:<callId>` or `a:<approvalId>`). */
+  id: string
+  kind: PendingKind
+  sessionId: string
+  detail: string
+  /** When the ask was first observed (epoch ms), copied from the pending row. */
+  startedAt: number
+  /** When the user dismissed it (epoch ms). */
+  ignoredAt: number
+}
 
 interface CipherBox {
   iv: string
@@ -108,12 +132,14 @@ interface StateFile {
   webUrl?: string
   /** The settings page explicitly chose "push without a link" ('' patch). */
   noLink?: boolean
+  /** Confirmations the user dismissed; skipped when recovery re-arms watches. */
+  ignored?: IgnoredInteraction[]
 }
 
 /** Rejected settings patch; `code` maps directly to the API error. */
 class StoreError extends Error {
   constructor(
-    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes' | 'invalid-weburl' | 'invalid-title',
+    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes' | 'invalid-weburl' | 'invalid-title' | 'invalid-id' | 'ignored-full',
     message: string,
   ) {
     super(message)
@@ -210,10 +236,61 @@ function decrypt(box: CipherBox, key: Buffer): string {
   }
 }
 
+function pendingIdOf(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const id = value.trim()
+  if (id.length < 3 || id.length > PENDING_ID_MAX) return null
+  if (!id.startsWith('q:') && !id.startsWith('a:')) return null
+  if (/[\u0000-\u001f\u007f]/.test(id)) return null
+  return id
+}
+
+function sessionIdOf(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const id = value.trim()
+  if (id.length === 0 || id.length > SESSION_ID_MAX) return null
+  if (/[\u0000-\u001f\u007f]/.test(id)) return null
+  return id
+}
+
+function epochOf(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return value
+}
+
+/** Drop malformed dismissals. A `q:` id is a question or plan review; `a:` is an approval. */
+function normalizeIgnored(value: unknown): IgnoredInteraction | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const id = pendingIdOf(record['id'])
+  const sessionId = sessionIdOf(record['sessionId'])
+  const kind = record['kind']
+  const startedAt = epochOf(record['startedAt'])
+  const ignoredAt = epochOf(record['ignoredAt'])
+  if (id === null || sessionId === null || startedAt === null || ignoredAt === null) return null
+  if (kind !== 'question' && kind !== 'plan-review' && kind !== 'approval') return null
+  if (id.startsWith('a:') ? kind !== 'approval' : kind === 'approval') return null
+  return {
+    id,
+    kind,
+    sessionId,
+    detail: truncate(typeof record['detail'] === 'string' ? record['detail'] : '', 500),
+    startedAt,
+    ignoredAt,
+  }
+}
+
 /** Encrypted on-disk settings store (AES-256-GCM under per-machine key.bin). */
 class SettingsStore {
   private readonly filePath: string
   private readonly key: Buffer
+
+  /**
+   * Session/id keys dismissed on the settings page. Loaded with the state file and then
+   * kept in memory so a `tool/result` for an ordinary call does not re-read
+   * disk. Production uses one store; the set is refreshed on every read/write.
+   */
+  private ignoredIds: Set<string> | null = null
 
   constructor(dir: string) {
     mkdirSync(dir, { recursive: true })
@@ -262,6 +339,87 @@ class SettingsStore {
   /** True when the settings page explicitly disabled the push link. */
   get noLink(): boolean {
     return this.read().noLink === true
+  }
+
+  /** Dismissals newest-first. Malformed file entries are already dropped. */
+  ignored(): IgnoredInteraction[] {
+    const items = this.read().ignored ?? []
+    return [...items].sort((a, b) => b.ignoredAt - a.ignoredAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  }
+
+  /** Whether recovery and live events must not arm this session's id. */
+  isIgnored(sessionId: string, id: string): boolean {
+    if (this.ignoredIds === null) this.read()
+    return this.ignoredIds?.has(interactionKey(sessionId, id)) === true
+  }
+
+  /**
+   * Persist one dismissal, replacing any previous record for the same session/id.
+   * A new pair is refused once {@link IGNORED_LIMIT} dismissals are already
+   * stored; replacing an existing pair does not grow the list.
+   * @throws {StoreError} when the id is rejected or the dismissal list is full.
+   */
+  ignore(entry: IgnoredInteraction): void {
+    const normalized = normalizeIgnored(entry)
+    if (normalized === null) throw new StoreError('invalid-id', '无法识别这项确认')
+    const current = this.read().ignored ?? []
+    const key = interactionKey(normalized.sessionId, normalized.id)
+    if (!current.some(item => interactionKey(item.sessionId, item.id) === key) && current.length >= IGNORED_LIMIT) {
+      throw new StoreError('ignored-full', `最多忽略 ${IGNORED_LIMIT} 项，请先恢复其中一项`)
+    }
+    this.mutateIgnored(items => [
+      normalized,
+      ...items.filter(item => interactionKey(item.sessionId, item.id) !== key),
+    ])
+  }
+
+  /** Remove one dismissal and return it, or undefined when it was not stored. */
+  restore(sessionId: string, id: string): IgnoredInteraction | undefined {
+    const parsed = pendingIdOf(id)
+    const session = sessionIdOf(sessionId)
+    if (parsed === null || session === null) return undefined
+    const key = interactionKey(session, parsed)
+    const found = this.read().ignored?.find(item => interactionKey(item.sessionId, item.id) === key)
+    if (found === undefined) return undefined
+    this.mutateIgnored(items => items.filter(item => interactionKey(item.sessionId, item.id) !== key))
+    return found
+  }
+
+  /** Drop one dismissal once its pair has closed. A miss does not touch disk. */
+  forget(sessionId: string, id: string): void {
+    if (!this.isIgnored(sessionId, id)) return
+    const key = interactionKey(sessionId, id)
+    this.mutateIgnored(items => {
+      const next = items.filter(item => interactionKey(item.sessionId, item.id) !== key)
+      return next.length === items.length ? null : next
+    })
+  }
+
+  /**
+   * Drop dismissals for one session that the log no longer shows as open.
+   * Callers must skip this when the log read came back empty: that is also
+   * what a failed snapshot looks like, and pruning then would resurrect the
+   * reminder on the next successful boot.
+   */
+  retainOpen(sessionId: string, openIds: ReadonlySet<string>): void {
+    if (this.ignoredIds === null) this.read()
+    if (this.ignoredIds?.size === 0) return
+    this.mutateIgnored(items => {
+      const next = items.filter(item => item.sessionId !== sessionId || openIds.has(item.id))
+      return next.length === items.length ? null : next
+    })
+  }
+
+  private mutateIgnored(
+    change: (items: readonly IgnoredInteraction[]) => IgnoredInteraction[] | null,
+  ): void {
+    const next = this.read()
+    const updated = change(next.ignored ?? [])
+    if (updated === null) return
+    if (updated.length === 0) delete next.ignored
+    else next.ignored = updated
+    next.version = 1
+    this.write(next)
   }
 
   /**
@@ -332,36 +490,57 @@ class SettingsStore {
 
   /** BOM/whitespace-tolerant parse; malformed or invalid fields are dropped. */
   private read(): StateFile {
+    let file: StateFile
     try {
       const raw = readFileSync(this.filePath).toString('utf8').replace(/^\uFEFF/, '').trim()
-      if (raw === '') return { version: 1 }
-      const parsed = JSON.parse(raw) as Partial<StateFile>
-      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { version: 1 }
-      const file: StateFile = { version: 1 }
-      if (parsed.sendkeyCipher !== undefined && parsed.sendkeyCipher !== null) {
-        file.sendkeyCipher = parsed.sendkeyCipher as CipherBox
+      if (raw === '') {
+        file = { version: 1 }
+      } else {
+        const parsed = JSON.parse(raw) as Partial<StateFile>
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          file = { version: 1 }
+        } else {
+          file = { version: 1 }
+          if (parsed.sendkeyCipher !== undefined && parsed.sendkeyCipher !== null) {
+            file.sendkeyCipher = parsed.sendkeyCipher as CipherBox
+          }
+          const threshold = minutesValue(parsed.thresholdMinutes, 1, 1440)
+          if (threshold !== null) file.thresholdMinutes = threshold
+          const repeat = minutesValue(parsed.repeatMinutes, 0, 1440)
+          if (repeat !== null) file.repeatMinutes = repeat
+          if (typeof parsed.enabled === 'boolean') file.enabled = parsed.enabled
+          if (typeof parsed.title === 'string' && parsed.title.trim() !== '' && parsed.title.length <= 32) {
+            file.title = parsed.title.trim()
+          }
+          if (typeof parsed.proxy === 'string') {
+            const normalized = proxyOf(parsed.proxy)
+            if (normalized !== null) file.proxy = normalized
+          }
+          if (typeof parsed.webUrl === 'string') {
+            const normalized = webUrlOf(parsed.webUrl)
+            if (normalized !== null) file.webUrl = normalized
+          }
+          if (parsed.noLink === true) file.noLink = true
+          if (Array.isArray(parsed.ignored)) {
+            const byId = new Map<string, IgnoredInteraction>()
+            for (const entry of parsed.ignored) {
+              const normalized = normalizeIgnored(entry)
+              if (normalized === null) continue
+              const key = interactionKey(normalized.sessionId, normalized.id)
+              const prev = byId.get(key)
+              if (prev === undefined || normalized.ignoredAt >= prev.ignoredAt) byId.set(key, normalized)
+            }
+            // Keep every valid dismissal. Trimming here would drop a record
+            // whose tracker is already stopped, and the next boot would remind.
+            if (byId.size > 0) file.ignored = [...byId.values()]
+          }
+        }
       }
-      const threshold = minutesValue(parsed.thresholdMinutes, 1, 1440)
-      if (threshold !== null) file.thresholdMinutes = threshold
-      const repeat = minutesValue(parsed.repeatMinutes, 0, 1440)
-      if (repeat !== null) file.repeatMinutes = repeat
-      if (typeof parsed.enabled === 'boolean') file.enabled = parsed.enabled
-      if (typeof parsed.title === 'string' && parsed.title.trim() !== '' && parsed.title.length <= 32) {
-        file.title = parsed.title.trim()
-      }
-      if (typeof parsed.proxy === 'string') {
-        const normalized = proxyOf(parsed.proxy)
-        if (normalized !== null) file.proxy = normalized
-      }
-      if (typeof parsed.webUrl === 'string') {
-        const normalized = webUrlOf(parsed.webUrl)
-        if (normalized !== null) file.webUrl = normalized
-      }
-      if (parsed.noLink === true) file.noLink = true
-      return file
     } catch {
-      return { version: 1 }
+      file = { version: 1 }
     }
+    this.ignoredIds = new Set((file.ignored ?? []).map(item => interactionKey(item.sessionId, item.id)))
+    return file
   }
 
   private write(file: StateFile): void {
@@ -371,6 +550,7 @@ class SettingsStore {
     // The ciphertext is only as safe as the directory the key lives in:
     // tighten the same way key.bin is tightened.
     tightenAcl(this.filePath)
+    this.ignoredIds = new Set((file.ignored ?? []).map(item => interactionKey(item.sessionId, item.id)))
   }
 }
 
@@ -649,8 +829,9 @@ export function apply(ctx: Context, config: Config): void {
     onFire: async (pending) => {
       // Re-check right before publishing: a stop() that landed while a
       // previous push (or the threshold tick) was in flight must not send a
-      // stale notice for an already-answered interaction.
-      if (!tracker.has(pending.id)) return 'terminal-failure'
+      // stale notice. A dismissal persisted just before this tick is the same
+      // kind of gap — `stop()` normally removes the entry first.
+      if (!tracker.has(pending.sessionId, pending.id) || store.isIgnored(pending.sessionId, pending.id)) return 'terminal-failure'
       // The master switch is read here, not at wiring time, so toggling it on
       // the settings page takes effect without a restart. Tracked entries stay
       // pending (visible on the page) and are pushed once it is back on, which
@@ -675,19 +856,67 @@ export function apply(ctx: Context, config: Config): void {
   // Per-session FIFO of open question/plan-review callIds, for the rare
   // fallback where a tool/result carries no call identity on its source.
   const questionQueues = new Map<string, string[]>()
+  /** Sessions currently attached. A restore for one that has gone must not push. */
+  const liveSessions = new Set<string>()
 
   ctx.effect(() => () => {
     tracker.dispose()
     questionQueues.clear()
+    liveSessions.clear()
   }, 'serverchan-watchdog: teardown')
 
+  /**
+   * One FIFO slot per call. Ignored questions stay here as placeholders:
+   * a later `tool/result` with no callId must consume that call and forget
+   * the dismissal, not the next live question. Deduped so a replay or a
+   * second recovery pass cannot stack placeholders.
+   */
+  const enqueueQuestion = (sessionId: string, callId: string): void => {
+    const queue = questionQueues.get(sessionId)
+    if (queue === undefined) questionQueues.set(sessionId, [callId])
+    else if (!queue.includes(callId)) queue.push(callId)
+  }
+
+  /**
+   * Collapse duplicate slots for one ignored call down to its first position.
+   * The placeholder has to stay in order; extra copies would swallow later
+   * anonymous results that belong to questions still being watched.
+   */
+  const collapsePlaceholder = (sessionId: string, callId: string): void => {
+    const queue = questionQueues.get(sessionId)
+    if (queue === undefined) return
+    let seen = false
+    const next: string[] = []
+    for (const entry of queue) {
+      if (entry === callId) {
+        if (seen) continue
+        seen = true
+      }
+      next.push(entry)
+    }
+    if (next.length === queue.length) return
+    if (next.length === 0) questionQueues.delete(sessionId)
+    else questionQueues.set(sessionId, next)
+  }
+
+  /**
+   * Put a restored question back at the head only when its placeholder is
+   * already gone. A placeholder left by ignore keeps the original order.
+   */
+  const restoreQueued = (sessionId: string, callId: string): void => {
+    const queue = questionQueues.get(sessionId)
+    if (queue === undefined) questionQueues.set(sessionId, [callId])
+    else if (!queue.includes(callId)) queue.unshift(callId)
+  }
+
   const armRecovered = (sessionId: string, seed: PendingSeed): void => {
-    tracker.start(seed)
+    // The log pair is still open — including asks that predate this plugin and
+    // the crash window where the human answered before the result was written.
+    // A dismissal must not re-arm the reminder. Question-shaped dismissals
+    // still occupy their FIFO slot so an anonymous result can clear them.
+    if (!store.isIgnored(seed.sessionId, seed.id)) tracker.start(seed)
     if (seed.kind === 'question' || seed.kind === 'plan-review') {
-      const callId = seed.id.slice(2)
-      const queue = questionQueues.get(sessionId)
-      if (queue === undefined) questionQueues.set(sessionId, [callId])
-      else if (!queue.includes(callId)) queue.push(callId)
+      enqueueQuestion(sessionId, seed.id.slice(2))
     }
   }
 
@@ -697,18 +926,42 @@ export function apply(ctx: Context, config: Config): void {
    * DSH 0.1.2 removed `session.events` in favor of `snapshotEvents()`.
    */
   const recoverSession = (session: { id: string }): void => {
+    let events: readonly SessionEventView[]
     try {
-      for (const seed of recoverPending(readSessionLog(session), session.id)) {
-        armRecovered(session.id, seed)
-      }
+      events = readSessionLog(session)
     } catch {
       log.warn(`recovery skipped for session ${session.id}`)
+      return
     }
+    let seeds: PendingSeed[]
+    try {
+      seeds = recoverPending(events, session.id)
+    } catch {
+      log.warn(`recovery skipped for session ${session.id}`)
+      return
+    }
+    // An empty log is also what a thrown snapshot becomes. Pruning dismissals
+    // on that read would bring the reminder back at the next successful boot.
+    // `seeds` already folds callId-less results in FIFO order, so a dismissal
+    // those results consumed is absent here and retainOpen drops it instead
+    // of leaving a tombstone that would swallow the next anonymous result.
+    if (events.length > 0) store.retainOpen(session.id, new Set(seeds.map(seed => seed.id)))
+    for (const seed of seeds) armRecovered(session.id, seed)
+  }
+
+  const watchQuestion = (sessionId: string, callId: string, seed: Parameters<PendingTracker['start']>[0]): void => {
+    // A replay of the same callId is the same ask. A second queue slot would
+    // survive the result that closes the first and then swallow the next one.
+    enqueueQuestion(sessionId, callId)
+    if (store.isIgnored(sessionId, seed.id)) return
+    tracker.start(seed)
   }
 
   // A session that vanishes (hard dispose) must not be pushed to forever:
-  // clear its pending entries and queue.
+  // clear its pending entries and queue. Dismissals stay on disk — a shutdown
+  // that disposes every session must not wipe them, or the next boot reminds.
   ctx.on('session/disposed', (session) => {
+    liveSessions.delete(session.id)
     tracker.stopWhere(pending => pending.sessionId === session.id)
     questionQueues.delete(session.id)
   })
@@ -723,10 +976,16 @@ export function apply(ctx: Context, config: Config): void {
     // The master switch deliberately does not gate this wiring: entries are
     // always tracked, and `enabled` is re-read per fire. Skipping the wiring
     // while off would make turning the switch on need a restart.
-    ctx.on('session/created', session => { recoverSession(session) })
+    ctx.on('session/created', session => {
+      liveSessions.add(session.id)
+      recoverSession(session)
+    })
     const sessions = ctx.get('sessions')
     if (sessions !== undefined) {
-      for (const session of sessions.list()) recoverSession(session)
+      for (const session of sessions.list()) {
+        liveSessions.add(session.id)
+        recoverSession(session)
+      }
     }
 
     ctx.on('session/event', (session, event) => {
@@ -734,10 +993,7 @@ export function apply(ctx: Context, config: Config): void {
         const callId = event.data.callId
         if (event.data.name === 'ask_user_question') {
           const described = describeQuestionCall(event.data.arguments)
-          const queue = questionQueues.get(session.id)
-          if (queue === undefined) questionQueues.set(session.id, [callId])
-          else queue.push(callId)
-          tracker.start({
+          watchQuestion(session.id, callId, {
             id: `q:${callId}`,
             kind: described?.kind ?? 'question',
             sessionId: session.id,
@@ -750,10 +1006,7 @@ export function apply(ctx: Context, config: Config): void {
         if (event.data.name === 'exit_plan_mode') {
           // Plan review: the tool asks `ctx.userQuestions` directly; the only
           // session-log signal is this tool's call/result pair.
-          const queue = questionQueues.get(session.id)
-          if (queue === undefined) questionQueues.set(session.id, [callId])
-          else queue.push(callId)
-          tracker.start({
+          watchQuestion(session.id, callId, {
             id: `q:${callId}`,
             kind: 'plan-review',
             sessionId: session.id,
@@ -767,27 +1020,39 @@ export function apply(ctx: Context, config: Config): void {
         const source = event.data.message?.source
         const callId = source?.kind === 'tool' ? source.callId : undefined
         if (callId !== undefined) {
-          tracker.stop(`q:${callId}`)
+          const id = `q:${callId}`
+          tracker.stop(session.id, id)
+          store.forget(session.id, id)
           const queue = questionQueues.get(session.id)
           if (queue !== undefined) {
-            const index = queue.indexOf(callId)
-            if (index >= 0) queue.splice(index, 1)
-            if (queue.length === 0) questionQueues.delete(session.id)
+            const kept = queue.filter(entry => entry !== callId)
+            if (kept.length === 0) questionQueues.delete(session.id)
+            else if (kept.length !== queue.length) questionQueues.set(session.id, kept)
           }
           return
         }
         // Fallback: no call identity on the result; assume FIFO completion order.
+        // An ignored call remains in the queue as a placeholder, so this shift
+        // forgets that dismissal. stop() is a no-op when the call is not tracked,
+        // and the next live question keeps its timer. Every replayed copy of
+        // the consumed call goes with it.
         const queue = questionQueues.get(session.id)
         const head = queue?.shift()
-        if (head !== undefined) {
-          tracker.stop(`q:${head}`)
-          if ((queue as string[]).length === 0) questionQueues.delete(session.id)
+        if (head !== undefined && queue !== undefined) {
+          const id = `q:${head}`
+          tracker.stop(session.id, id)
+          store.forget(session.id, id)
+          const kept = queue.filter(entry => entry !== head)
+          if (kept.length === 0) questionQueues.delete(session.id)
+          else questionQueues.set(session.id, kept)
         }
         return
       }
       if (event.type === 'approval/asked') {
+        const id = `a:${event.data.id}`
+        if (store.isIgnored(session.id, id)) return
         tracker.start({
-          id: `a:${event.data.id}`,
+          id,
           kind: 'approval',
           sessionId: session.id,
           detail: event.data.reason ?? `工具 ${event.data.toolName} 请求审批`,
@@ -795,10 +1060,23 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       if (event.type === 'approval/decided') {
-        tracker.stop(`a:${event.data.id}`)
+        const id = `a:${event.data.id}`
+        tracker.stop(session.id, id)
+        store.forget(session.id, id)
       }
     })
   }
+
+  const snapshot = (): {
+    ok: true
+    pending: PendingInteraction[]
+    ignored: IgnoredInteraction[]
+  } & ReturnType<typeof editableView> => ({
+    ok: true,
+    ...editableView(config, store),
+    pending: tracker.list(),
+    ignored: store.ignored(),
+  })
 
   // The webserver row belongs to another bundle layer and may activate after
   // this row: ctx.inject waits for it (the subagent-library pattern) instead
@@ -816,11 +1094,7 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         if (!guardLoopback(req, res)) return
-        sendJson(res, 200, {
-          ok: true,
-          ...editableView(config, store),
-          pending: tracker.list(),
-        })
+        sendJson(res, 200, snapshot())
       },
     }), 'serverchan-watchdog: status route')
 
@@ -896,6 +1170,90 @@ export function apply(ctx: Context, config: Config): void {
         sendJson(res, 200, { ok: result.ok, message: result.message })
       },
     }), 'serverchan-watchdog: test route')
+
+    wctx.effect(() => web.register({
+      kind: 'exact',
+      path: '/serverchan-watchdog/ignore',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
+          return
+        }
+        if (!guardWrite(req, res)) return
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'body-too-large' })
+          return
+        }
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { ok: false, error: 'invalid-json' })
+          return
+        }
+        const record = body as Record<string, unknown>
+        const id = pendingIdOf(record['id'])
+        const sessionId = sessionIdOf(record['sessionId'])
+        if (id === null || sessionId === null) {
+          sendJson(res, 400, { ok: false, error: 'invalid-id' })
+          return
+        }
+        if (record['restore'] === true) {
+          const restored = store.restore(sessionId, id)
+          if (restored === undefined) {
+            sendJson(res, 404, { ok: false, error: 'not-ignored' })
+            return
+          }
+          // Only a session that is still attached can be watched again. Starting
+          // a timer for one that was disposed would push about an interaction
+          // the host has already dropped.
+          if (liveSessions.has(restored.sessionId)) {
+            tracker.start({
+              id: restored.id,
+              kind: restored.kind,
+              sessionId: restored.sessionId,
+              detail: restored.detail,
+              startedAt: restored.startedAt,
+            })
+            if (restored.kind !== 'approval') restoreQueued(restored.sessionId, restored.id.slice(2))
+          }
+          log.info(`restored ignored confirmation ${restored.id}`)
+          sendJson(res, 200, snapshot())
+          return
+        }
+        const current = tracker.list().find(item => item.sessionId === sessionId && item.id === id)
+        if (current === undefined) {
+          sendJson(res, 404, { ok: false, error: 'not-pending' })
+          return
+        }
+        try {
+          store.ignore({
+            id: current.id,
+            kind: current.kind,
+            sessionId: current.sessionId,
+            detail: current.detail,
+            startedAt: current.startedAt,
+            ignoredAt: Date.now(),
+          })
+        } catch (error) {
+          if (error instanceof StoreError) {
+            sendJson(res, 400, { ok: false, error: error.code, message: error.message })
+          } else {
+            log.warn('ignore save failed')
+            sendJson(res, 500, { ok: false, error: 'save-failed' })
+          }
+          return
+        }
+        // Persist first: a crash between the write and stop() still comes back
+        // dismissed. stop() cancels the in-memory timer for this process.
+        // The FIFO slot stays, collapsed to one placeholder, so an anonymous
+        // result for this call cannot be charged to the next open question.
+        tracker.stop(current.sessionId, current.id)
+        if (current.kind !== 'approval') collapsePlaceholder(current.sessionId, current.id.slice(2))
+        log.info(`ignored confirmation ${current.id}`)
+        sendJson(res, 200, snapshot())
+      },
+    }), 'serverchan-watchdog: ignore route')
   })
 }
 

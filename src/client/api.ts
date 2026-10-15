@@ -30,8 +30,19 @@ export interface WatchdogPendingView {
   pushes: number
 }
 
+/** One confirmation the user dismissed. It stays out of the reminder loop until restored. */
+export interface WatchdogIgnoredView {
+  id: string
+  kind: 'question' | 'plan-review' | 'approval'
+  sessionId: string
+  detail: string
+  startedAt: number
+  ignoredAt: number
+}
+
 export interface WatchdogStatus extends WatchdogConfigView {
   pending?: WatchdogPendingView[]
+  ignored?: WatchdogIgnoredView[]
 }
 
 export interface WatchdogTestResult {
@@ -105,6 +116,27 @@ export async function saveConfig(patch: WatchdogPatch): Promise<WatchdogConfigVi
     return payload
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : 'config save failed' }
+  }
+}
+
+/**
+ * Dismiss one waiting confirmation, or put it back on the watch.
+ * The host writes the choice into its state file and returns the new lists.
+ */
+export async function postPendingAction(sessionId: string, id: string, restore: boolean): Promise<WatchdogStatus> {
+  try {
+    const response = await fetch('/serverchan-watchdog/ignore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(restore ? { sessionId, id, restore: true } : { sessionId, id }),
+    })
+    const payload = await readJson<WatchdogStatus>(response)
+    if (!response.ok || payload.ok !== true) {
+      return { ...payload, ok: false, error: failureOf(payload, response) }
+    }
+    return payload
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'pending action failed' }
   }
 }
 

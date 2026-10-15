@@ -143,7 +143,7 @@ test('PendingTracker.stop() before the threshold suppresses the push', async () 
   const fired: string[] = []
   const tracker = new PendingTracker({ thresholdMs: 20, repeatMs: 0, onFire: p => { fired.push(p.id) } })
   tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
-  tracker.stop('q:1')
+  tracker.stop('s', 'q:1')
   await new Promise(resolve => setTimeout(resolve, 60))
   assert.deepEqual(fired, [])
 })
@@ -153,7 +153,7 @@ test('PendingTracker repeats while active and stops after stop()', async () => {
   const tracker = new PendingTracker({ thresholdMs: 15, repeatMs: 15, onFire: p => { fired.push(p.id) } })
   tracker.start({ id: 'a:9', kind: 'approval', sessionId: 's', detail: 'd' })
   await new Promise(resolve => setTimeout(resolve, 70))
-  tracker.stop('a:9')
+  tracker.stop('s', 'a:9')
   const count = fired.length
   assert.ok(count >= 2, `expected at least 2 pushes, got ${count}`)
   await new Promise(resolve => setTimeout(resolve, 50))
@@ -167,7 +167,7 @@ test('PendingTracker.start is idempotent and stop of unknown id is a no-op', asy
   tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
   tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
   assert.equal(tracker.size, 1)
-  tracker.stop('q:unknown')
+  tracker.stop('s', 'q:unknown')
   assert.equal(tracker.size, 1)
   tracker.dispose()
 })
@@ -175,10 +175,48 @@ test('PendingTracker.start is idempotent and stop of unknown id is a no-op', asy
 test('PendingTracker.has reflects the active set', () => {
   const tracker = new PendingTracker({ thresholdMs: 1000, repeatMs: 0, onFire: () => {} })
   tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
-  assert.equal(tracker.has('q:1'), true)
-  tracker.stop('q:1')
-  assert.equal(tracker.has('q:1'), false)
+  assert.equal(tracker.has('s', 'q:1'), true)
+  tracker.stop('s', 'q:1')
+  assert.equal(tracker.has('s', 'q:1'), false)
   tracker.dispose()
+})
+
+test('PendingTracker scopes duplicate ids, timers, and stops to their session', async () => {
+  const scheduled: Array<{ fn: () => void; cancelled: boolean }> = []
+  const fired: string[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: 1,
+    repeatMs: 0,
+    after: (_ms, fn) => {
+      const timer = { fn, cancelled: false }
+      scheduled.push(timer)
+      return timer
+    },
+    cancel: timer => { (timer as { cancelled: boolean }).cancelled = true },
+    onFire: pending => { fired.push(`${pending.sessionId}/${pending.id}`) },
+  })
+  try {
+    for (const sessionId of ['session-A', 'session-B']) {
+      tracker.start({ id: 'q:call-0', kind: 'question', sessionId, detail: sessionId })
+      tracker.start({ id: 'a:approval-0', kind: 'approval', sessionId, detail: sessionId })
+      tracker.start({ id: 'q:call-0', kind: 'question', sessionId, detail: 'replay' })
+    }
+    assert.equal(tracker.size, 4)
+    assert.equal(tracker.has('session-A', 'q:call-0'), true)
+    assert.equal(tracker.has('session-B', 'q:call-0'), true)
+    tracker.stop('session-A', 'q:call-0')
+    tracker.stop('session-A', 'a:approval-0')
+    assert.equal(tracker.has('session-A', 'q:call-0'), false)
+    assert.equal(tracker.has('session-B', 'q:call-0'), true)
+    for (const timer of scheduled) if (!timer.cancelled) timer.fn()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(fired, ['session-B/q:call-0', 'session-B/a:approval-0'])
+    assert.deepEqual(tracker.list().map(pending => pending.pushes), [1, 1])
+    tracker.stopWhere(pending => pending.sessionId === 'session-A')
+    assert.equal(tracker.size, 2)
+  } finally {
+    tracker.dispose()
+  }
 })
 
 test('PendingTracker uses an injected clock', () => {
@@ -325,7 +363,7 @@ test('PendingTracker bounds retryable failures to the initial attempt plus two r
     await new Promise(resolve => setImmediate(resolve))
   }
   assert.deepEqual(attempts, [1, 1, 1])
-  assert.equal(tracker.has('q:bounded'), false)
+  assert.equal(tracker.has('s', 'q:bounded'), false)
   tracker.dispose()
 })
 
@@ -342,7 +380,7 @@ test('PendingTracker stops immediately after a terminal failure', async () => {
   tracker.start({ id: 'q:terminal', kind: 'question', sessionId: 's', detail: 'd' })
   scheduled[0]?.()
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(tracker.has('q:terminal'), false)
+  assert.equal(tracker.has('s', 'q:terminal'), false)
   assert.equal(scheduled.length, 1)
 })
 
@@ -366,11 +404,11 @@ test('PendingTracker never re-arms after stop while a fire is in flight', async 
     tracker.start({ id: `q:${settle}`, kind: 'question', sessionId: 's', detail: 'd' })
     scheduled[0]?.()
     await new Promise(resolve => setImmediate(resolve))
-    tracker.stop(`q:${settle}`)
+    tracker.stop('s', `q:${settle}`)
     if (settle === 'resolve') resolveFire('retryable-failure')
     else rejectFire(new Error('boom'))
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(tracker.has(`q:${settle}`), false)
+    assert.equal(tracker.has('s', `q:${settle}`), false)
     assert.equal(scheduled.length, 1)
   }
 })
@@ -505,6 +543,112 @@ test('recoverPending seeds unclosed ask/approval pairs only', () => {
   assert.equal(seeds[0]?.kind, 'plan-review')
   assert.equal(seeds[1]?.startedAt, 6000)
   assert.equal(seeds[1]?.kind, 'approval')
+})
+
+test('recoverPending consumes callId-less results in FIFO order and leaves approvals alone', () => {
+  const ask = (callId: string, time: number, name = 'ask_user_question') => ({
+    type: 'tool/call',
+    time,
+    data: {
+      callId,
+      name,
+      arguments: name === 'exit_plan_mode'
+        ? JSON.stringify({ plan: '# 计划' })
+        : JSON.stringify({ questions: [{ question: callId }] }),
+    },
+  })
+  const anonymous = (time: number) => ({ type: 'tool/result', time, data: { message: {} } })
+  const identified = (callId: string, time: number) => ({
+    type: 'tool/result',
+    time,
+    data: { message: { source: { kind: 'tool', callId } } },
+  })
+
+  // The anonymous result answers the head, not a question that opens later.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), anonymous(2), ask('B', 3)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  // Two open questions: one anonymous result closes only the oldest.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), ask('B', 2), anonymous(3)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  // A second anonymous result closes the new head. An identified result still
+  // closes its own call even when it is not the head, and a later anonymous
+  // result then takes whatever is oldest.
+  assert.deepEqual(
+    recoverPending([
+      ask('A', 1),
+      ask('B', 2),
+      ask('C', 3, 'exit_plan_mode'),
+      identified('B', 4),
+      anonymous(5),
+    ], 's1').map(seed => seed.id),
+    ['q:C'],
+  )
+  assert.deepEqual(
+    recoverPending([
+      ask('A', 1),
+      ask('C', 3, 'exit_plan_mode'),
+      identified('A', 4),
+      anonymous(5),
+    ], 's1'),
+    [],
+  )
+  // Extra anonymous results with an empty FIFO do not eat a question that
+  // has not been asked yet, and they do not close an approval.
+  const withApproval = recoverPending([
+    anonymous(1),
+    { type: 'approval/asked', time: 2, data: { id: 'ap', toolName: 'bash', reason: '跑' } },
+    ask('A', 3),
+    anonymous(4),
+    anonymous(5),
+  ], 's1')
+  assert.deepEqual(withApproval.map(seed => seed.id), ['a:ap'])
+})
+
+test('recoverPending keeps one seed for a replayed call and closes every copy', () => {
+  const ask = (callId: string, time: number) => ({
+    type: 'tool/call',
+    time,
+    data: {
+      callId,
+      name: 'ask_user_question',
+      arguments: JSON.stringify({ questions: [{ question: callId }] }),
+    },
+  })
+  const anonymous = (time: number) => ({ type: 'tool/result', time, data: { message: {} } })
+  const identified = (callId: string, time: number) => ({
+    type: 'tool/result',
+    time,
+    data: { message: { source: { kind: 'tool', callId } } },
+  })
+
+  const replayed = recoverPending([ask('A', 1000), ask('A', 5000), ask('B', 6000)], 's1')
+  assert.deepEqual(replayed.map(seed => seed.id), ['q:A', 'q:B'])
+  assert.equal(replayed[0]?.startedAt, 1000)
+
+  // The identified result closes both copies, so the duplicate cannot stay pending.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), ask('A', 2), identified('A', 3), ask('B', 4)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  // One anonymous result consumes the replayed head entirely and leaves B.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), ask('A', 2), ask('B', 3), anonymous(4)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  // A replay that is not adjacent is still the same call.
+  assert.deepEqual(
+    recoverPending([ask('A', 1), ask('B', 2), ask('A', 3), identified('A', 4)], 's1').map(seed => seed.id),
+    ['q:B'],
+  )
+  assert.deepEqual(recoverPending([
+    { type: 'approval/asked', time: 1, data: { id: 'ap', toolName: 'bash' } },
+    { type: 'approval/asked', time: 2, data: { id: 'ap', toolName: 'bash' } },
+    { type: 'approval/decided', time: 3, data: { id: 'ap' } },
+  ], 's1'), [])
 })
 
 test('readSessionLog prefers snapshotEvents (DSH 0.1.2+) and falls back to events', () => {
