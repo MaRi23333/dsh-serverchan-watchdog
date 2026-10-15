@@ -669,7 +669,7 @@ test('an ignored confirmation is not re-armed after restart and can be restored'
   }
 })
 
-test('ignoring a question leaves the FIFO fallback, and a replay does not re-arm it', async () => {
+test('a callId-less result consumes an ignored question and leaves the next one alerting', async () => {
   const dir = tempDir()
   const mount = mountHost(dir)
   const session = { id: 'sess-live', snapshotEvents: () => [] as unknown[] }
@@ -683,6 +683,9 @@ test('ignoring a question leaves the FIFO fallback, and a replay does not re-arm
       },
     })
   }
+  const anonymousResult = (): void => {
+    mount.emit('session/event', session, { type: 'tool/result', data: { message: {} } })
+  }
   try {
     mount.emit('session/created', session)
     ask('A', '先回答这个')
@@ -695,21 +698,112 @@ test('ignoring a question leaves the FIFO fallback, and a replay does not re-arm
     assert.deepEqual(idsOf(ignored.json['pending']), ['q:B'])
     assert.deepEqual(idsOf(ignored.json['ignored']), ['q:A'])
 
+    // Replays of the dismissed call must not stack extra placeholders.
     ask('A', '先回答这个')
-    mount.emit('session/event', session, { type: 'tool/result', data: { message: {} } })
+    ask('A', '先回答这个')
+    anonymousResult()
+    status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+    // B is still watched, so its threshold timer is still armed.
+    assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+    assert.equal(new SettingsStore(dir).isIgnored('q:A'), false)
+
+    anonymousResult()
     status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), [])
-    assert.deepEqual(idsOf(status.json['ignored']), ['q:A'])
+    await flushTimers()
+  } finally {
+    mount.cleanup()
+    await flushTimers()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
+test('restoring an ignored question keeps its FIFO place ahead of the next question', async () => {
+  const dir = tempDir()
+  const mount = mountHost(dir)
+  const session = { id: 'sess-restore-fifo', snapshotEvents: () => [] as unknown[] }
+  const ask = (callId: string): void => {
     mount.emit('session/event', session, {
-      type: 'tool/result',
-      data: { message: { source: { kind: 'tool', callId: 'A' } } },
+      type: 'tool/call',
+      data: {
+        callId,
+        name: 'ask_user_question',
+        arguments: JSON.stringify({ questions: [{ question: callId }] }),
+      },
     })
-    status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+  }
+  try {
+    mount.emit('session/created', session)
+    ask('A')
+    ask('B')
+    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:A' }))
+    assert.deepEqual(idsOf(ignored.json['pending']), ['q:B'])
+    const restored = await callRoute(
+      mount.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'q:A', restore: true }),
+    )
+    assert.deepEqual(idsOf(restored.json['pending']).sort(), ['q:A', 'q:B'])
+    mount.emit('session/event', session, { type: 'tool/result', data: { message: {} } })
+    const status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
     assert.deepEqual(idsOf(status.json['ignored']), [])
     await flushTimers()
   } finally {
     mount.cleanup()
+    await flushTimers()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('recovery keeps an ignored question ahead of the next one in the FIFO', async () => {
+  const dir = tempDir()
+  const mounts: HostMount[] = []
+  const events = [
+    {
+      type: 'tool/call',
+      time: 1_000,
+      data: {
+        callId: 'A',
+        name: 'ask_user_question',
+        arguments: JSON.stringify({ questions: [{ question: '先回答这个' }] }),
+      },
+    },
+    {
+      type: 'tool/call',
+      time: 2_000,
+      data: {
+        callId: 'B',
+        name: 'ask_user_question',
+        arguments: JSON.stringify({ questions: [{ question: '再回答这个' }] }),
+      },
+    },
+  ]
+  const session = { id: 'sess-recover-fifo', snapshotEvents: () => events }
+  try {
+    const first = mountHost(dir)
+    mounts.push(first)
+    first.emit('session/created', session)
+    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:A' }))
+    assert.deepEqual(idsOf(ignored.json['pending']), ['q:B'])
+    first.cleanup()
+
+    const second = mountHost(dir)
+    mounts.push(second)
+    second.emit('session/created', session)
+    let status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
+    assert.deepEqual(idsOf(status.json['ignored']), ['q:A'])
+    second.emit('session/event', session, { type: 'tool/result', data: { message: {} } })
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
+    assert.deepEqual(idsOf(status.json['ignored']), [])
+    assert.equal(new SettingsStore(dir).isIgnored('q:A'), false)
+    await flushTimers()
+  } finally {
+    for (const mount of mounts.reverse()) mount.cleanup()
     await flushTimers()
     rmSync(dir, { recursive: true, force: true })
   }

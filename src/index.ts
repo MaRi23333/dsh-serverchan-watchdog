@@ -853,16 +853,44 @@ export function apply(ctx: Context, config: Config): void {
     liveSessions.clear()
   }, 'serverchan-watchdog: teardown')
 
-  const dropQueued = (sessionId: string, callId: string): void => {
+  /**
+   * One FIFO slot per call. Ignored questions stay here as placeholders:
+   * a later `tool/result` with no callId must consume that call and forget
+   * the dismissal, not the next live question. Deduped so a replay or a
+   * second recovery pass cannot stack placeholders.
+   */
+  const enqueueQuestion = (sessionId: string, callId: string): void => {
     const queue = questionQueues.get(sessionId)
-    if (queue === undefined) return
-    const kept = queue.filter(entry => entry !== callId)
-    if (kept.length === queue.length) return
-    if (kept.length === 0) questionQueues.delete(sessionId)
-    else questionQueues.set(sessionId, kept)
+    if (queue === undefined) questionQueues.set(sessionId, [callId])
+    else if (!queue.includes(callId)) queue.push(callId)
   }
 
-  /** Put a restored question back at the head so the FIFO fallback stays ordered. */
+  /**
+   * Collapse duplicate slots for one ignored call down to its first position.
+   * The placeholder has to stay in order; extra copies would swallow later
+   * anonymous results that belong to questions still being watched.
+   */
+  const collapsePlaceholder = (sessionId: string, callId: string): void => {
+    const queue = questionQueues.get(sessionId)
+    if (queue === undefined) return
+    let seen = false
+    const next: string[] = []
+    for (const entry of queue) {
+      if (entry === callId) {
+        if (seen) continue
+        seen = true
+      }
+      next.push(entry)
+    }
+    if (next.length === queue.length) return
+    if (next.length === 0) questionQueues.delete(sessionId)
+    else questionQueues.set(sessionId, next)
+  }
+
+  /**
+   * Put a restored question back at the head only when its placeholder is
+   * already gone. A placeholder left by ignore keeps the original order.
+   */
   const restoreQueued = (sessionId: string, callId: string): void => {
     const queue = questionQueues.get(sessionId)
     if (queue === undefined) questionQueues.set(sessionId, [callId])
@@ -872,14 +900,11 @@ export function apply(ctx: Context, config: Config): void {
   const armRecovered = (sessionId: string, seed: PendingSeed): void => {
     // The log pair is still open — including asks that predate this plugin and
     // the crash window where the human answered before the result was written.
-    // A dismissal has to win here or every boot re-arms the reminder.
-    if (store.isIgnored(seed.id)) return
-    tracker.start(seed)
+    // A dismissal must not re-arm the reminder. Question-shaped dismissals
+    // still occupy their FIFO slot so an anonymous result can clear them.
+    if (!store.isIgnored(seed.id)) tracker.start(seed)
     if (seed.kind === 'question' || seed.kind === 'plan-review') {
-      const callId = seed.id.slice(2)
-      const queue = questionQueues.get(sessionId)
-      if (queue === undefined) questionQueues.set(sessionId, [callId])
-      else if (!queue.includes(callId)) queue.push(callId)
+      enqueueQuestion(sessionId, seed.id.slice(2))
     }
   }
 
@@ -910,7 +935,10 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const watchQuestion = (sessionId: string, callId: string, seed: Parameters<PendingTracker['start']>[0]): void => {
-    if (store.isIgnored(seed.id)) return
+    if (store.isIgnored(seed.id)) {
+      enqueueQuestion(sessionId, callId)
+      return
+    }
     const queue = questionQueues.get(sessionId)
     if (queue === undefined) questionQueues.set(sessionId, [callId])
     else queue.push(callId)
@@ -992,6 +1020,9 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         // Fallback: no call identity on the result; assume FIFO completion order.
+        // An ignored call remains in the queue as a placeholder, so this shift
+        // forgets that dismissal. stop() is a no-op when the call is not tracked,
+        // and the next live question keeps its timer.
         const queue = questionQueues.get(session.id)
         const head = queue?.shift()
         if (head !== undefined) {
@@ -1199,8 +1230,10 @@ export function apply(ctx: Context, config: Config): void {
         }
         // Persist first: a crash between the write and stop() still comes back
         // dismissed. stop() cancels the in-memory timer for this process.
+        // The FIFO slot stays, collapsed to one placeholder, so an anonymous
+        // result for this call cannot be charged to the next open question.
         tracker.stop(current.id)
-        if (current.kind !== 'approval') dropQueued(current.sessionId, current.id.slice(2))
+        if (current.kind !== 'approval') collapsePlaceholder(current.sessionId, current.id.slice(2))
         log.info(`ignored confirmation ${current.id}`)
         sendJson(res, 200, snapshot())
       },

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- 设置页「等待中的确认」可以为卡住的项选择忽略。忽略写入本机状态，重启 DSH 后不再提醒，并可以恢复。 / Pending confirmations in settings can be ignored. The dismissal is stored on this machine, so a DSH restart does not remind again, and it can be restored.
+- 设置页「等待中的确认」可以为卡住的项选择忽略。忽略写入本机状态，重启 DSH 后不再提醒，并可以恢复。被忽略的提问仍占着会话 FIFO 的位置，没有 callId 的结果会清掉这项忽略，而不会停掉下一项仍在等待的提醒。 / Pending confirmations in settings can be ignored. The dismissal is stored on this machine, so a DSH restart does not remind again, and it can be restored. An ignored question keeps its FIFO slot, so a result without a callId clears that dismissal instead of stopping the next question that is still waiting.
 
 ## 0.2.0（2026-10-07）
 
