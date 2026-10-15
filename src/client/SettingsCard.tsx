@@ -74,6 +74,7 @@ const ERROR_KEYS: Record<string, WatchdogKey> = {
   'invalid-id': 'settings.error.invalid-id',
   'not-pending': 'settings.error.not-pending',
   'not-ignored': 'settings.error.not-ignored',
+  'ignored-full': 'settings.error.ignored-full',
 }
 
 function draftOf(view: WatchdogConfigView): Draft {

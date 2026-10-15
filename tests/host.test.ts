@@ -384,7 +384,7 @@ test('SettingsStore persists dismissals across restarts without touching the cre
   }
 })
 
-test('SettingsStore drops malformed dismissals, caps the list, and prunes closed sessions', () => {
+test('SettingsStore drops malformed dismissals, refuses a 51st, and prunes closed sessions', () => {
   const dir = tempDir()
   try {
     const store = new SettingsStore(dir)
@@ -407,7 +407,7 @@ test('SettingsStore drops malformed dismissals, caps the list, and prunes closed
     assert.deepEqual(cleaned.ignored?.map(item => item.id), ['q:ok'])
     assert.equal(loaded.restore('q:ok')?.detail, 'newer')
 
-    for (let index = 0; index < 55; index += 1) {
+    for (let index = 0; index < 50; index += 1) {
       loaded.ignore({
         id: `q:id-${index}`,
         kind: 'question',
@@ -417,12 +417,36 @@ test('SettingsStore drops malformed dismissals, caps the list, and prunes closed
         ignoredAt: index,
       })
     }
-    const capped = loaded.ignored()
-    assert.equal(capped.length, 50)
-    assert.equal(capped.some(item => item.id === 'q:id-0'), false)
-    assert.equal(capped.some(item => item.id === 'q:id-4'), false)
-    assert.equal(capped.some(item => item.id === 'q:id-5'), true)
-    assert.equal(capped[0]?.id, 'q:id-54')
+    assert.equal(loaded.ignored().length, 50)
+    const beforeOverflow = readFileSync(join(dir, 'state.json'), 'utf8')
+    assert.throws(() => loaded.ignore({
+      id: 'q:overflow',
+      kind: 'question',
+      sessionId: 's1',
+      detail: 'overflow',
+      startedAt: 1,
+      ignoredAt: 10_000,
+    }), (error: unknown) => {
+      assert.ok(error instanceof StoreError)
+      assert.equal(error.code, 'ignored-full')
+      return true
+    })
+    assert.equal(readFileSync(join(dir, 'state.json'), 'utf8'), beforeOverflow)
+    assert.equal(loaded.isIgnored('q:id-0'), true)
+    assert.equal(loaded.isIgnored('q:overflow'), false)
+    // Replacing an existing id does not grow the list and is still allowed.
+    loaded.ignore({
+      id: 'q:id-0',
+      kind: 'question',
+      sessionId: 's1',
+      detail: 'refreshed',
+      startedAt: 1,
+      ignoredAt: 10_000,
+    })
+    assert.equal(loaded.ignored().length, 50)
+    assert.equal(loaded.ignored().find(item => item.id === 'q:id-0')?.detail, 'refreshed')
+    loaded.retainOpen('s1', new Set())
+    assert.deepEqual(loaded.ignored(), [])
 
     loaded.ignore({ id: 'q:keep', kind: 'question', sessionId: 's1', detail: 'keep', startedAt: 1, ignoredAt: 100 })
     loaded.ignore({ id: 'q:drop', kind: 'plan-review', sessionId: 's1', detail: 'drop', startedAt: 1, ignoredAt: 101 })
@@ -438,6 +462,42 @@ test('SettingsStore drops malformed dismissals, caps the list, and prunes closed
     loaded.retainOpen('s9', new Set())
     loaded.forget('q:absent')
     assert.equal(readFileSync(join(dir, 'state.json'), 'utf8'), before)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SettingsStore keeps every stored dismissal when the file is already over the cap', () => {
+  const dir = tempDir()
+  try {
+    new SettingsStore(dir)
+    const ignored = Array.from({ length: 51 }, (_, index) => ({
+      id: `q:kept-${index}`,
+      kind: 'question',
+      sessionId: 's1',
+      detail: 'd',
+      startedAt: index,
+      ignoredAt: index,
+    }))
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({ version: 1, ignored }))
+    const loaded = new SettingsStore(dir)
+    assert.equal(loaded.ignored().length, 51)
+    assert.equal(loaded.isIgnored('q:kept-0'), true)
+    assert.equal(loaded.isIgnored('q:kept-50'), true)
+    assert.throws(() => loaded.ignore({
+      id: 'q:one-more',
+      kind: 'question',
+      sessionId: 's1',
+      detail: 'd',
+      startedAt: 1,
+      ignoredAt: 99,
+    }), (error: unknown) => {
+      assert.ok(error instanceof StoreError)
+      assert.equal(error.code, 'ignored-full')
+      return true
+    })
+    assert.equal(loaded.ignored().length, 51)
+    assert.equal(loaded.isIgnored('q:kept-0'), true)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -897,6 +957,74 @@ test('restoring after the session is gone drops the dismissal without starting a
     assert.equal(new SettingsStore(dir).isIgnored('q:gone'), false)
   } finally {
     mount.cleanup()
+    await flushTimers()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a full ignore list refuses the next dismissal and still watches it after restart', async () => {
+  const dir = tempDir()
+  const mounts: HostMount[] = []
+  const startedAt = Date.now()
+  const events = Array.from({ length: 51 }, (_, index) => ({
+    type: 'tool/call',
+    time: startedAt + index,
+    data: {
+      callId: `c${index}`,
+      name: 'ask_user_question',
+      arguments: JSON.stringify({ questions: [{ question: `问题 ${index}` }] }),
+    },
+  }))
+  const session = { id: 'sess-cap', snapshotEvents: () => events }
+  try {
+    const first = mountHost(dir)
+    mounts.push(first)
+    first.emit('session/created', session)
+    let status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
+    assert.equal(idsOf(status.json['pending']).length, 51)
+
+    for (let index = 0; index < 50; index += 1) {
+      const ignored = await callRoute(
+        first.routes,
+        '/serverchan-watchdog/ignore',
+        'POST',
+        JSON.stringify({ id: `q:c${index}` }),
+      )
+      assert.equal(ignored.status, 200, `ignore q:c${index}`)
+    }
+    status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['q:c50'])
+    assert.equal(idsOf(status.json['ignored']).length, 50)
+    assert.equal(idsOf(status.json['ignored']).includes('q:c0'), true)
+
+    const rejected = await callRoute(
+      first.routes,
+      '/serverchan-watchdog/ignore',
+      'POST',
+      JSON.stringify({ id: 'q:c50' }),
+    )
+    assert.equal(rejected.status, 400)
+    assert.equal(rejected.json['error'], 'ignored-full')
+    status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
+    // The refused row is still tracked, so its reminder timer is still armed.
+    assert.deepEqual(idsOf(status.json['pending']), ['q:c50'])
+    assert.equal(idsOf(status.json['ignored']).length, 50)
+    assert.equal(idsOf(status.json['ignored']).includes('q:c50'), false)
+    assert.equal(idsOf(status.json['ignored']).includes('q:c0'), true)
+    first.cleanup()
+
+    const second = mountHost(dir)
+    mounts.push(second)
+    second.emit('session/created', session)
+    status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+    assert.deepEqual(idsOf(status.json['pending']), ['q:c50'])
+    assert.equal(idsOf(status.json['ignored']).length, 50)
+    assert.equal(idsOf(status.json['ignored']).includes('q:c0'), true)
+    assert.equal(idsOf(status.json['ignored']).includes('q:c50'), false)
+    assert.equal(new SettingsStore(dir).isIgnored('q:c50'), false)
+    await flushTimers()
+  } finally {
+    for (const mount of mounts.reverse()) mount.cleanup()
     await flushTimers()
     rmSync(dir, { recursive: true, force: true })
   }

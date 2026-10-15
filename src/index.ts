@@ -90,7 +90,12 @@ const DEFAULT_TITLE = 'DSH 等待人工确认'
 const TITLE_MAX = 32
 /** Title budget left for the user's own words once `（第 N 次）` is appended. */
 const TITLE_BASE_MAX = 20
-/** Dismissed confirmations kept in the state file; the oldest drop off past this. */
+/**
+ * New dismissals are refused once this many are already stored. Existing
+ * records are never dropped to make room: the tracker was already stopped
+ * for each of them, so evicting one would leave it unmonitored until the
+ * next boot re-armed it. The settings copy states this same limit.
+ */
 const IGNORED_LIMIT = 50
 /** Tracker ids are `q:<callId>` / `a:<approvalId>`; reject anything that cannot be one. */
 const PENDING_ID_MAX = 512
@@ -134,7 +139,7 @@ interface StateFile {
 /** Rejected settings patch; `code` maps directly to the API error. */
 class StoreError extends Error {
   constructor(
-    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes' | 'invalid-weburl' | 'invalid-title' | 'invalid-id',
+    readonly code: 'invalid-sendkey' | 'invalid-proxy' | 'invalid-minutes' | 'invalid-weburl' | 'invalid-title' | 'invalid-id' | 'ignored-full',
     message: string,
   ) {
     super(message)
@@ -275,12 +280,6 @@ function normalizeIgnored(value: unknown): IgnoredInteraction | null {
   }
 }
 
-function cappedIgnored(items: readonly IgnoredInteraction[]): IgnoredInteraction[] {
-  return [...items]
-    .sort((a, b) => b.ignoredAt - a.ignoredAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .slice(0, IGNORED_LIMIT)
-}
-
 /** Encrypted on-disk settings store (AES-256-GCM under per-machine key.bin). */
 class SettingsStore {
   private readonly filePath: string
@@ -356,15 +355,21 @@ class SettingsStore {
 
   /**
    * Persist one dismissal, replacing any previous record for the same id.
-   * @throws {StoreError} when the id or the record shape is rejected.
+   * A new id is refused once {@link IGNORED_LIMIT} dismissals are already
+   * stored; replacing an existing id does not grow the list.
+   * @throws {StoreError} when the id is rejected or the dismissal list is full.
    */
   ignore(entry: IgnoredInteraction): void {
     const normalized = normalizeIgnored(entry)
     if (normalized === null) throw new StoreError('invalid-id', '无法识别这项确认')
-    this.mutateIgnored(items => cappedIgnored([
+    const current = this.read().ignored ?? []
+    if (!current.some(item => item.id === normalized.id) && current.length >= IGNORED_LIMIT) {
+      throw new StoreError('ignored-full', `最多忽略 ${IGNORED_LIMIT} 项，请先恢复其中一项`)
+    }
+    this.mutateIgnored(items => [
       normalized,
       ...items.filter(item => item.id !== normalized.id),
-    ]))
+    ])
   }
 
   /** Remove one dismissal and return it, or undefined when it was not stored. */
@@ -520,7 +525,9 @@ class SettingsStore {
               const prev = byId.get(normalized.id)
               if (prev === undefined || normalized.ignoredAt >= prev.ignoredAt) byId.set(normalized.id, normalized)
             }
-            if (byId.size > 0) file.ignored = cappedIgnored([...byId.values()])
+            // Keep every valid dismissal. Trimming here would drop a record
+            // whose tracker is already stopped, and the next boot would remind.
+            if (byId.size > 0) file.ignored = [...byId.values()]
           }
         }
       }

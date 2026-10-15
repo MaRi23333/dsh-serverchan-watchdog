@@ -104,6 +104,7 @@ export type WatchdogKey =
   | 'settings.error.invalid-id'
   | 'settings.error.not-pending'
   | 'settings.error.not-ignored'
+  | 'settings.error.ignored-full'
   | 'settings.error.unknown'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -209,6 +210,7 @@ export const zh: Record<WatchdogKey, string> = {
   'settings.error.invalid-id': '无法识别这项确认',
   'settings.error.not-pending': '这项确认已经不在等待列表里',
   'settings.error.not-ignored': '这项确认不在已忽略列表里',
+  'settings.error.ignored-full': '已忽略 50 项。请先恢复一项，再忽略新的确认。',
   'settings.error.unknown': '保存失败，请查看主机端日志',
 }
 
@@ -309,5 +311,6 @@ export const en: Record<WatchdogKey, string> = {
   'settings.error.invalid-id': 'That confirmation could not be recognized',
   'settings.error.not-pending': 'That confirmation is no longer waiting',
   'settings.error.not-ignored': 'That confirmation is not in the ignored list',
+  'settings.error.ignored-full': '50 confirmations are already ignored. Restore one before ignoring another.',
   'settings.error.unknown': 'Save failed; check the host log',
 }
