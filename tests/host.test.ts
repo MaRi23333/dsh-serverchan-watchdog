@@ -12,6 +12,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { apply, StoreError, SettingsStore, guardLoopback, guardWrite, pushDesp, sendPush, type Config, type EffectiveSettings } from '../src/index.ts'
+import { postPendingAction } from '../src/client/api.ts'
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'scw-test-'))
@@ -357,19 +358,19 @@ test('SettingsStore persists dismissals across restarts without touching the cre
     const again = new SettingsStore(dir)
     assert.equal(again.sendkey, 'SCTabc123')
     assert.equal(again.thresholdMinutes, 8)
-    assert.equal(again.isIgnored('q:stuck'), true)
+    assert.equal(again.isIgnored('sess-1', 'q:stuck'), true)
     assert.equal(again.ignored()[0]?.detail, '继续吗？')
     again.update({ thresholdMinutes: 9 })
     assert.equal(again.thresholdMinutes, 9)
-    assert.equal(again.isIgnored('q:stuck'), true)
-    const restored = again.restore('q:stuck')
+    assert.equal(again.isIgnored('sess-1', 'q:stuck'), true)
+    const restored = again.restore('sess-1', 'q:stuck')
     assert.equal(restored?.id, 'q:stuck')
-    assert.equal(again.isIgnored('q:stuck'), false)
+    assert.equal(again.isIgnored('sess-1', 'q:stuck'), false)
     assert.deepEqual(again.ignored(), [])
     const raw = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as { ignored?: unknown, thresholdMinutes?: number }
     assert.equal(raw.ignored, undefined)
     assert.equal(raw.thresholdMinutes, 9)
-    assert.equal(again.restore('q:stuck'), undefined)
+    assert.equal(again.restore('sess-1', 'q:stuck'), undefined)
     assert.throws(() => again.ignore({
       id: 'not-an-id',
       kind: 'question',
@@ -405,7 +406,7 @@ test('SettingsStore drops malformed dismissals, refuses a 51st, and prunes close
     loaded.update({ repeatMinutes: 2 })
     const cleaned = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as { ignored?: Array<{ id: string }> }
     assert.deepEqual(cleaned.ignored?.map(item => item.id), ['q:ok'])
-    assert.equal(loaded.restore('q:ok')?.detail, 'newer')
+    assert.equal(loaded.restore('s1', 'q:ok')?.detail, 'newer')
 
     for (let index = 0; index < 50; index += 1) {
       loaded.ignore({
@@ -432,8 +433,17 @@ test('SettingsStore drops malformed dismissals, refuses a 51st, and prunes close
       return true
     })
     assert.equal(readFileSync(join(dir, 'state.json'), 'utf8'), beforeOverflow)
-    assert.equal(loaded.isIgnored('q:id-0'), true)
-    assert.equal(loaded.isIgnored('q:overflow'), false)
+    assert.equal(loaded.isIgnored('s1', 'q:id-0'), true)
+    assert.equal(loaded.isIgnored('s1', 'q:overflow'), false)
+    assert.throws(() => loaded.ignore({
+      id: 'q:id-0',
+      kind: 'question',
+      sessionId: 's2',
+      detail: 'same id, new session',
+      startedAt: 1,
+      ignoredAt: 10_000,
+    }), (error: unknown) => error instanceof StoreError && error.code === 'ignored-full')
+    assert.equal(readFileSync(join(dir, 'state.json'), 'utf8'), beforeOverflow)
     // Replacing an existing id does not grow the list and is still allowed.
     loaded.ignore({
       id: 'q:id-0',
@@ -453,14 +463,14 @@ test('SettingsStore drops malformed dismissals, refuses a 51st, and prunes close
     loaded.ignore({ id: 'a:other', kind: 'approval', sessionId: 's2', detail: 'other', startedAt: 1, ignoredAt: 102 })
     loaded.retainOpen('s1', new Set(['q:keep']))
     assert.deepEqual(loaded.ignored().map(item => item.id).sort(), ['a:other', 'q:keep'])
-    loaded.forget('a:missing')
-    assert.equal(loaded.isIgnored('a:other'), true)
-    loaded.forget('a:other')
+    loaded.forget('s2', 'a:missing')
+    assert.equal(loaded.isIgnored('s2', 'a:other'), true)
+    loaded.forget('s2', 'a:other')
     assert.deepEqual(loaded.ignored().map(item => item.id), ['q:keep'])
     // An empty dismissal set must not rewrite the file just to prune.
     const before = readFileSync(join(dir, 'state.json'), 'utf8')
     loaded.retainOpen('s9', new Set())
-    loaded.forget('q:absent')
+    loaded.forget('s9', 'q:absent')
     assert.equal(readFileSync(join(dir, 'state.json'), 'utf8'), before)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -482,8 +492,8 @@ test('SettingsStore keeps every stored dismissal when the file is already over t
     writeFileSync(join(dir, 'state.json'), JSON.stringify({ version: 1, ignored }))
     const loaded = new SettingsStore(dir)
     assert.equal(loaded.ignored().length, 51)
-    assert.equal(loaded.isIgnored('q:kept-0'), true)
-    assert.equal(loaded.isIgnored('q:kept-50'), true)
+    assert.equal(loaded.isIgnored('s1', 'q:kept-0'), true)
+    assert.equal(loaded.isIgnored('s1', 'q:kept-50'), true)
     assert.throws(() => loaded.ignore({
       id: 'q:one-more',
       kind: 'question',
@@ -497,7 +507,7 @@ test('SettingsStore keeps every stored dismissal when the file is already over t
       return true
     })
     assert.equal(loaded.ignored().length, 51)
-    assert.equal(loaded.isIgnored('q:kept-0'), true)
+    assert.equal(loaded.isIgnored('s1', 'q:kept-0'), true)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -602,6 +612,175 @@ function idsOf(value: unknown): string[] {
 
 const flushTimers = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
 
+function identitiesOf(value: unknown): Array<[string, string]> {
+  assert.ok(Array.isArray(value))
+  return value.map(item => {
+    assert.ok(item !== null && typeof item === 'object')
+    const row = item as { sessionId: string, id: string }
+    assert.equal(typeof row.sessionId, 'string')
+    assert.equal(typeof row.id, 'string')
+    return [row.sessionId, row.id] as [string, string]
+  }).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+}
+
+for (const kind of ['question', 'approval'] as const) {
+  test(`session identity isolates concurrent ${kind} ids, ignores, recovery, and restores`, async () => {
+    const dir = tempDir()
+    const mounts: HostMount[] = []
+    const id = kind === 'question' ? 'q:call-0' : 'a:approval-0'
+    const ask = kind === 'question'
+      ? { type: 'tool/call', time: Date.now(), data: { callId: 'call-0', name: 'ask_user_question', arguments: '{"questions":[{"question":"continue?"}]}' } }
+      : { type: 'approval/asked', time: Date.now(), data: { id: 'approval-0', toolName: 'bash', reason: 'continue?' } }
+    const sessions = ['session-A', 'session-B'].map(sessionId => ({ id: sessionId, snapshotEvents: () => [ask] }))
+    try {
+      const first = mountHost(dir)
+      mounts.push(first)
+      for (const session of sessions) first.emit('session/created', session)
+      let status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
+      assert.deepEqual(identitiesOf(status.json['pending']), [['session-A', id], ['session-B', id]])
+
+      for (const session of sessions) {
+        const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id }))
+        assert.equal(ignored.status, 200)
+        assert.equal(identitiesOf(ignored.json['ignored']).some(([sessionId]) => sessionId === session.id), true)
+        if (session.id === 'session-A') assert.deepEqual(identitiesOf(ignored.json['pending']), [['session-B', id]])
+      }
+      first.cleanup()
+
+      const second = mountHost(dir)
+      mounts.push(second)
+      for (const session of sessions) second.emit('session/created', session)
+      status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+      assert.deepEqual(identitiesOf(status.json['pending']), [])
+      assert.deepEqual(identitiesOf(status.json['ignored']), [['session-A', id], ['session-B', id]])
+
+      const restoredA = await callRoute(second.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: 'session-A', id, restore: true }))
+      assert.equal(restoredA.status, 200)
+      assert.deepEqual(identitiesOf(restoredA.json['pending']), [['session-A', id]])
+      assert.deepEqual(identitiesOf(restoredA.json['ignored']), [['session-B', id]])
+      const restoredB = await callRoute(second.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: 'session-B', id, restore: true }))
+      assert.equal(restoredB.status, 200)
+      assert.deepEqual(identitiesOf(restoredB.json['pending']), [['session-A', id], ['session-B', id]])
+      assert.deepEqual(identitiesOf(restoredB.json['ignored']), [])
+
+      second.emit('session/event', sessions[1], kind === 'question'
+        ? { type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'call-0' } } } }
+        : { type: 'approval/decided', data: { id: 'approval-0' } })
+      status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
+      assert.deepEqual(identitiesOf(status.json['pending']), [['session-A', id]])
+    } finally {
+      for (const mount of mounts.reverse()) mount.cleanup()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+for (const completion of ['identified', 'anonymous', 'approval'] as const) {
+  test(`session identity keeps a disposed session's ignore when a new session has the same ${completion} id`, async () => {
+    const dir = tempDir()
+    const mount = mountHost(dir)
+    const sessions = ['session-A', 'session-B'].map(id => ({ id, snapshotEvents: () => [] }))
+    const approval = completion === 'approval'
+    const id = approval ? 'a:approval-0' : 'q:call-0'
+    const ask = approval
+      ? { type: 'approval/asked', data: { id: 'approval-0', toolName: 'bash', reason: 'continue?' } }
+      : { type: 'tool/call', data: { callId: 'call-0', name: 'ask_user_question', arguments: '{"questions":[{"question":"continue?"}]}' } }
+    try {
+      mount.emit('session/created', sessions[0])
+      mount.emit('session/event', sessions[0], ask)
+      const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: 'session-A', id }))
+      assert.equal(ignored.status, 200)
+      mount.emit('session/disposed', sessions[0])
+      mount.emit('session/created', sessions[1])
+      mount.emit('session/event', sessions[1], ask)
+      let status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+      assert.deepEqual(identitiesOf(status.json['pending']), [['session-B', id]])
+      assert.deepEqual(identitiesOf(status.json['ignored']), [['session-A', id]])
+
+      mount.emit('session/event', sessions[1], approval
+        ? { type: 'approval/decided', data: { id: 'approval-0' } }
+        : { type: 'tool/result', data: { message: completion === 'anonymous' ? {} : { source: { kind: 'tool', callId: 'call-0' } } } })
+      status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
+      assert.deepEqual(identitiesOf(status.json['pending']), [])
+      assert.deepEqual(identitiesOf(status.json['ignored']), [['session-A', id]])
+      const restored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: 'session-A', id, restore: true }))
+      assert.equal(restored.status, 200)
+      assert.deepEqual(identitiesOf(restored.json['pending']), [])
+      assert.deepEqual(identitiesOf(restored.json['ignored']), [])
+    } finally {
+      mount.cleanup()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+test('SettingsStore session identity preserves v1 dismissals and deduplicates only matching pairs', () => {
+  const dir = tempDir()
+  try {
+    const store = new SettingsStore(dir)
+    store.update({ sendkey: 'SCTtestIdentity', thresholdMinutes: 8, repeatMinutes: 2, title: 'custom', proxy: 'http://127.0.0.1:7897', webUrl: '' })
+    const before = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as Record<string, unknown>
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({
+      ...before,
+      ignored: [
+        { sessionId: 'session-A', id: 'q:call-0', kind: 'question', detail: 'older', startedAt: 1, ignoredAt: 2 },
+        { sessionId: 'session-B', id: 'q:call-0', kind: 'question', detail: 'other', startedAt: 3, ignoredAt: 4 },
+        { sessionId: 'session-A', id: 'q:call-0', kind: 'question', detail: 'newer', startedAt: 1, ignoredAt: 5 },
+      ],
+    }))
+    const loaded = new SettingsStore(dir)
+    assert.deepEqual(identitiesOf(loaded.ignored()), [['session-A', 'q:call-0'], ['session-B', 'q:call-0']])
+    loaded.update({ thresholdMinutes: 9 })
+    assert.equal(loaded.sendkey, 'SCTtestIdentity')
+    const saved = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as Record<string, unknown>
+    for (const key of ['version', 'sendkeyCipher', 'repeatMinutes', 'title', 'proxy', 'noLink']) assert.deepEqual(saved[key], before[key], key)
+    assert.equal(loaded.restore('session-A', 'q:call-0')?.detail, 'newer')
+    assert.equal(loaded.isIgnored('session-B', 'q:call-0'), true)
+    loaded.forget('session-A', 'q:call-0')
+    assert.equal(loaded.isIgnored('session-B', 'q:call-0'), true)
+    assert.equal(new SettingsStore(dir).isIgnored('session-B', 'q:call-0'), true)
+    loaded.forget('session-B', 'q:call-0')
+    assert.deepEqual(loaded.ignored(), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the client pending action targets the requested session when ids match', async () => {
+  const dir = tempDir()
+  const mount = mountHost(dir)
+  const originalFetch = globalThis.fetch
+  const ask = { type: 'tool/call', data: { callId: 'call-0', name: 'ask_user_question', arguments: '{"questions":[{"question":"continue?"}]}' } }
+  const sessions = ['session-A', 'session-B'].map(id => ({ id, snapshotEvents: () => [] }))
+  try {
+    for (const session of sessions) {
+      mount.emit('session/created', session)
+      mount.emit('session/event', session, ask)
+    }
+    globalThis.fetch = async (path, init) => {
+      assert.equal(path, '/serverchan-watchdog/ignore')
+      assert.equal(init?.method, 'POST')
+      const result = await callRoute(mount.routes, String(path), 'POST', String(init?.body))
+      return new Response(JSON.stringify(result.json), { status: result.status })
+    }
+    const ignored = await postPendingAction('session-B', 'q:call-0', false)
+    assert.equal(ignored.ok, true)
+    assert.deepEqual(identitiesOf(ignored.pending), [['session-A', 'q:call-0']])
+    assert.deepEqual(identitiesOf(ignored.ignored), [['session-B', 'q:call-0']])
+    const wrongSession = await postPendingAction('session-A', 'q:call-0', true)
+    assert.equal(wrongSession.ok, false)
+    assert.equal(wrongSession.error, 'not-ignored')
+    const restored = await postPendingAction('session-B', 'q:call-0', true)
+    assert.equal(restored.ok, true)
+    assert.deepEqual(identitiesOf(restored.pending), [['session-A', 'q:call-0'], ['session-B', 'q:call-0']])
+    assert.deepEqual(identitiesOf(restored.ignored), [])
+  } finally {
+    globalThis.fetch = originalFetch
+    mount.cleanup()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('an ignored confirmation is not re-armed after restart and can be restored', async () => {
   const dir = tempDir()
   const mounts: HostMount[] = []
@@ -630,7 +809,7 @@ test('an ignored confirmation is not re-armed after restart and can be restored'
       first.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'q:stuck-call' }),
+      JSON.stringify({ sessionId: session.id, id: 'q:stuck-call' }),
     )
     assert.equal(ignored.status, 200)
     assert.deepEqual(idsOf(ignored.json['pending']), [])
@@ -649,7 +828,7 @@ test('an ignored confirmation is not re-armed after restart and can be restored'
     assert.equal(saved.status, 200)
     assert.equal(saved.json['thresholdMinutes'], 9)
     assert.equal(Object.hasOwn(saved.json, 'ignored'), false)
-    assert.equal(new SettingsStore(dir).isIgnored('q:stuck-call'), true)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:stuck-call'), true)
     assert.ok(readFileSync(join(dir, 'state.json'), 'utf8').includes('q:stuck-call'))
 
     await flushTimers()
@@ -658,7 +837,7 @@ test('an ignored confirmation is not re-armed after restart and can be restored'
 
     // Shutdown disposes the session but must keep the dismissal on disk.
     first.emit('session/disposed', session)
-    assert.equal(new SettingsStore(dir).isIgnored('q:stuck-call'), true)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:stuck-call'), true)
     first.cleanup()
 
     const second = mountHost(dir)
@@ -673,13 +852,13 @@ test('an ignored confirmation is not re-armed after restart and can be restored'
     events = []
     second.emit('session/created', session)
     second.emit('session/created', { id: 'sess-stuck', snapshotEvents: () => { throw new Error('boom') } })
-    assert.equal(new SettingsStore(dir).isIgnored('q:stuck-call'), true)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:stuck-call'), true)
 
     const restored = await callRoute(
       second.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'q:stuck-call', restore: true }),
+      JSON.stringify({ sessionId: session.id, id: 'q:stuck-call', restore: true }),
     )
     assert.equal(restored.status, 200)
     assert.deepEqual(idsOf(restored.json['ignored']), [])
@@ -701,7 +880,7 @@ test('an ignored confirmation is not re-armed after restart and can be restored'
       second.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'q:stuck-call' }),
+      JSON.stringify({ sessionId: session.id, id: 'q:stuck-call' }),
     )
     assert.equal(dismissedAgain.status, 200)
     second.cleanup()
@@ -753,7 +932,7 @@ test('a callId-less result consumes an ignored question and leaves the next one 
     let status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), ['q:A', 'q:B'])
 
-    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:A' }))
+    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id: 'q:A' }))
     assert.equal(ignored.status, 200)
     assert.deepEqual(idsOf(ignored.json['pending']), ['q:B'])
     assert.deepEqual(idsOf(ignored.json['ignored']), ['q:A'])
@@ -766,7 +945,7 @@ test('a callId-less result consumes an ignored question and leaves the next one 
     // B is still watched, so its threshold timer is still armed.
     assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
     assert.deepEqual(idsOf(status.json['ignored']), [])
-    assert.equal(new SettingsStore(dir).isIgnored('q:A'), false)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:A'), false)
 
     anonymousResult()
     status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
@@ -797,13 +976,13 @@ test('restoring an ignored question keeps its FIFO place ahead of the next quest
     mount.emit('session/created', session)
     ask('A')
     ask('B')
-    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:A' }))
+    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id: 'q:A' }))
     assert.deepEqual(idsOf(ignored.json['pending']), ['q:B'])
     const restored = await callRoute(
       mount.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'q:A', restore: true }),
+      JSON.stringify({ sessionId: session.id, id: 'q:A', restore: true }),
     )
     assert.deepEqual(idsOf(restored.json['pending']).sort(), ['q:A', 'q:B'])
     mount.emit('session/event', session, { type: 'tool/result', data: { message: {} } })
@@ -838,7 +1017,7 @@ test('recovery folds anonymous results already in the log before keeping ignores
     mounts.push(first)
     first.emit('session/created', session)
     for (const id of ['q:A', 'q:C']) {
-      const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id }))
+      const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id }))
       assert.equal(ignored.status, 200, id)
     }
     let status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
@@ -855,7 +1034,7 @@ test('recovery folds anonymous results already in the log before keeping ignores
     status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
     assert.deepEqual(idsOf(status.json['ignored']), ['q:C'])
-    assert.equal(new SettingsStore(dir).isIgnored('q:A'), false)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:A'), false)
 
     // The next anonymous result belongs to B. A stale tombstone for A would
     // swallow it and leave B alerting.
@@ -895,7 +1074,7 @@ test('recovery does not re-arm a question an anonymous log result already closed
     const first = mountHost(dir)
     mounts.push(first)
     first.emit('session/created', session)
-    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:B' }))
+    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id: 'q:B' }))
     assert.equal(ignored.status, 200)
     assert.deepEqual(idsOf(ignored.json['pending']), ['q:A'])
     first.cleanup()
@@ -961,7 +1140,7 @@ test('a replayed call is one ask on the live FIFO, ignored or not', async () => 
 
     ask('C')
     ask('C')
-    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:C' }))
+    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id: 'q:C' }))
     assert.equal(ignored.status, 200)
     assert.deepEqual(idsOf(ignored.json['pending']), [])
     assert.deepEqual(idsOf(ignored.json['ignored']), ['q:C'])
@@ -1004,7 +1183,7 @@ test('recovery closes every copy of a replayed call, including an ignored one', 
     first.emit('session/created', session)
     let status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), ['q:A', 'q:B'])
-    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:A' }))
+    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id: 'q:A' }))
     assert.equal(ignored.status, 200)
     assert.deepEqual(idsOf(ignored.json['pending']), ['q:B'])
     first.cleanup()
@@ -1016,7 +1195,7 @@ test('recovery closes every copy of a replayed call, including an ignored one', 
     status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
     assert.deepEqual(idsOf(status.json['ignored']), [])
-    assert.equal(new SettingsStore(dir).isIgnored('q:A'), false)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:A'), false)
     second.emit('session/event', session, { type: 'tool/result', data: { message: {} } })
     status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), [])
@@ -1057,7 +1236,7 @@ test('recovery keeps an ignored question ahead of the next one in the FIFO', asy
     const first = mountHost(dir)
     mounts.push(first)
     first.emit('session/created', session)
-    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:A' }))
+    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id: 'q:A' }))
     assert.deepEqual(idsOf(ignored.json['pending']), ['q:B'])
     first.cleanup()
 
@@ -1071,7 +1250,7 @@ test('recovery keeps an ignored question ahead of the next one in the FIFO', asy
     status = await callRoute(second.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), ['q:B'])
     assert.deepEqual(idsOf(status.json['ignored']), [])
-    assert.equal(new SettingsStore(dir).isIgnored('q:A'), false)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:A'), false)
     await flushTimers()
   } finally {
     for (const mount of mounts.reverse()) mount.cleanup()
@@ -1098,7 +1277,7 @@ test('an ignored approval stays dismissed across restart until it is decided', a
     first.emit('session/created', session)
     let status = await callRoute(first.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), ['a:ap-1'])
-    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'a:ap-1' }))
+    const ignored = await callRoute(first.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id: 'a:ap-1' }))
     assert.equal(ignored.status, 200)
     assert.deepEqual(idsOf(ignored.json['pending']), [])
     assert.equal((ignored.json['ignored'] as Array<{ kind?: unknown }>)[0]?.kind, 'approval')
@@ -1115,7 +1294,7 @@ test('an ignored approval stays dismissed across restart until it is decided', a
       second.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'a:ap-1', restore: true }),
+      JSON.stringify({ sessionId: session.id, id: 'a:ap-1', restore: true }),
     )
     assert.deepEqual(idsOf(restored.json['pending']), ['a:ap-1'])
     assert.deepEqual(idsOf(restored.json['ignored']), [])
@@ -1149,15 +1328,15 @@ test('restoring after the session is gone drops the dismissal without starting a
   }
   try {
     mount.emit('session/created', session)
-    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:gone' }))
+    const ignored = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: session.id, id: 'q:gone' }))
     assert.equal(ignored.status, 200)
     mount.emit('session/disposed', session)
-    assert.equal(new SettingsStore(dir).isIgnored('q:gone'), true)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:gone'), true)
     const restored = await callRoute(
       mount.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'q:gone', restore: true }),
+      JSON.stringify({ sessionId: session.id, id: 'q:gone', restore: true }),
     )
     assert.equal(restored.status, 200)
     assert.deepEqual(idsOf(restored.json['pending']), [])
@@ -1165,7 +1344,7 @@ test('restoring after the session is gone drops the dismissal without starting a
     await flushTimers()
     const status = await callRoute(mount.routes, '/serverchan-watchdog/status', 'GET')
     assert.deepEqual(idsOf(status.json['pending']), [])
-    assert.equal(new SettingsStore(dir).isIgnored('q:gone'), false)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:gone'), false)
   } finally {
     mount.cleanup()
     await flushTimers()
@@ -1199,7 +1378,7 @@ test('a full ignore list refuses the next dismissal and still watches it after r
         first.routes,
         '/serverchan-watchdog/ignore',
         'POST',
-        JSON.stringify({ id: `q:c${index}` }),
+        JSON.stringify({ sessionId: session.id, id: `q:c${index}` }),
       )
       assert.equal(ignored.status, 200, `ignore q:c${index}`)
     }
@@ -1212,7 +1391,7 @@ test('a full ignore list refuses the next dismissal and still watches it after r
       first.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'q:c50' }),
+      JSON.stringify({ sessionId: session.id, id: 'q:c50' }),
     )
     assert.equal(rejected.status, 400)
     assert.equal(rejected.json['error'], 'ignored-full')
@@ -1232,7 +1411,7 @@ test('a full ignore list refuses the next dismissal and still watches it after r
     assert.equal(idsOf(status.json['ignored']).length, 50)
     assert.equal(idsOf(status.json['ignored']).includes('q:c0'), true)
     assert.equal(idsOf(status.json['ignored']).includes('q:c50'), false)
-    assert.equal(new SettingsStore(dir).isIgnored('q:c50'), false)
+    assert.equal(new SettingsStore(dir).isIgnored(session.id, 'q:c50'), false)
     await flushTimers()
   } finally {
     for (const mount of mounts.reverse()) mount.cleanup()
@@ -1245,19 +1424,27 @@ test('the ignore route rejects bad ids, unknown rows, and non-loopback peers', a
   const dir = tempDir()
   const mount = mountHost(dir)
   try {
-    const missing = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:missing' }))
+    const missing = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: 'session', id: 'q:missing' }))
     assert.equal(missing.status, 404)
     assert.equal(missing.json['error'], 'not-pending')
 
-    const bad = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ id: 'q:bad\nid' }))
+    const bad = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId: 'session', id: 'q:bad\nid' }))
     assert.equal(bad.status, 400)
     assert.equal(bad.json['error'], 'invalid-id')
+
+    for (const sessionId of [undefined, null, 123, '', '   ', 'bad\nsession', 'x'.repeat(1025)]) {
+      for (const restore of [false, true]) {
+        const invalid = await callRoute(mount.routes, '/serverchan-watchdog/ignore', 'POST', JSON.stringify({ sessionId, id: 'q:missing', restore }))
+        assert.equal(invalid.status, 400)
+        assert.equal(invalid.json['error'], 'invalid-id')
+      }
+    }
 
     const restore = await callRoute(
       mount.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'q:missing', restore: true }),
+      JSON.stringify({ sessionId: 'session', id: 'q:missing', restore: true }),
     )
     assert.equal(restore.status, 404)
     assert.equal(restore.json['error'], 'not-ignored')
@@ -1266,7 +1453,7 @@ test('the ignore route rejects bad ids, unknown rows, and non-loopback peers', a
       mount.routes,
       '/serverchan-watchdog/ignore',
       'POST',
-      JSON.stringify({ id: 'q:missing' }),
+      JSON.stringify({ sessionId: 'session', id: 'q:missing' }),
       '192.168.1.5',
     )
     assert.equal(remote.status, 403)

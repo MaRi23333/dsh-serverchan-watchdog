@@ -46,7 +46,7 @@
 
 本轮目标宿主为 DSH `0.2.0-rc.2` 与同版本桌面客户端。开发侧报告迁移后可用，运行时版本与 bundle 准入条件已核对；桌面设置页、真实后台提醒及通知客户端中的 `dsh://` 点击链路仍需按实际使用环境验证，不把加载兼容等同于端到端验收。
 
-**0.2.0** 重做了设置页面：改用官方设计令牌与 UI primitives，拆成六块卡片，新增总开关与推送标题设置，并让等待队列显示实时等待时长与提醒次数。行为与文案变更见 [CHANGELOG.md](./CHANGELOG.md)。
+**0.2.1** 新增卡住确认的「忽略 / 恢复提醒」：忽略立即生效、重启后保留，只影响所选会话中的那一项，不会批准或回答原来的确认。已有配置草稿不会因此保存或丢失。完整变更见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 安装
 
@@ -125,7 +125,7 @@ dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
 | `/serverchan-watchdog/status` | GET | 生效配置摘要、当前等待列表与已忽略列表，不含凭据或本机状态目录路径 |
 | `/serverchan-watchdog/config` | GET | 可编辑设置视图，不含凭据 |
 | `/serverchan-watchdog/config` | POST | 保存 SendKey、总开关、阈值、重复间隔、标题、代理或链接 |
-| `/serverchan-watchdog/ignore` | POST | 忽略或恢复一条等待中的确认（`{ id, restore? }`），写入本机状态 |
+| `/serverchan-watchdog/ignore` | POST | 忽略或恢复一条等待中的确认（`{ sessionId, id, restore? }`），写入本机状态 |
 | `/serverchan-watchdog/test` | POST | 发送一条测试推送 |
 
 写接口要求 JSON 及回环同源校验。

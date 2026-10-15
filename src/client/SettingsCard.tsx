@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import clsx from 'clsx'
 import { Button, Input, Switch, Tag, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './settings.module.css'
+import { interactionKey } from '../core.ts'
 import type {
   WatchdogConfigView,
   WatchdogPatch,
@@ -41,8 +42,8 @@ export interface WatchdogSettingsInjected {
   config: () => Promise<WatchdogConfigView>
   status: () => Promise<WatchdogStatus>
   saveConfig: (patch: WatchdogPatch) => Promise<WatchdogConfigView>
-  ignorePending: (id: string) => Promise<WatchdogStatus>
-  restorePending: (id: string) => Promise<WatchdogStatus>
+  ignorePending: (sessionId: string, id: string) => Promise<WatchdogStatus>
+  restorePending: (sessionId: string, id: string) => Promise<WatchdogStatus>
   test: () => Promise<WatchdogTestResult>
 }
 
@@ -131,7 +132,7 @@ export function WatchdogSettings(props: {
   const [credentialConfigured, setCredentialConfigured] = useState(false)
   const [pending, setPending] = useState<readonly WatchdogPendingView[]>([])
   const [ignored, setIgnored] = useState<readonly WatchdogIgnoredView[]>([])
-  /** Id of the dismissal/restore currently talking to the host, if any. */
+  /** Session/id key of the dismissal/restore currently talking to the host, if any. */
   const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [pendingActionError, setPendingActionError] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -210,12 +211,12 @@ export function WatchdogSettings(props: {
     return () => { window.clearInterval(timer) }
   }, [pending.length, ignored.length])
 
-  const runPendingAction = (id: string, action: (id: string) => Promise<WatchdogStatus>): void => {
+  const runPendingAction = (item: Pick<WatchdogPendingView, 'sessionId' | 'id'>, action: WatchdogSettingsInjected['ignorePending']): void => {
     if (pendingAction !== null || saving) return
     const ticket = ++listEpoch.current
-    setPendingAction(id)
+    setPendingAction(interactionKey(item.sessionId, item.id))
     setPendingActionError(null)
-    void action(id).then((result) => {
+    void action(item.sessionId, item.id).then((result) => {
       if (!alive.current || ticket !== listEpoch.current) return
       // Drop polls that started while this request was in flight.
       listEpoch.current += 1
@@ -554,9 +555,10 @@ export function WatchdogSettings(props: {
                     <p className={css.hint}>{t('settings.pending.ignoreHint')}</p>
                     <ul className={css.pendingList}>
                       {pending.map(item => {
-                        const acting = pendingAction === item.id
+                        const key = interactionKey(item.sessionId, item.id)
+                        const acting = pendingAction === key
                         return (
-                          <li key={item.id} className={css.pendingItem}>
+                          <li key={key} className={css.pendingItem}>
                             <span className={css.kind}>{t(KINDS[item.kind] ?? 'settings.kind.question')}</span>
                             <div className={css.pendingBody}>
                               <span className={css.pendingDetail}>{item.detail}</span>
@@ -573,7 +575,7 @@ export function WatchdogSettings(props: {
                                 variant="outline"
                                 disabled={saving || pendingAction !== null}
                                 aria-label={t('settings.pending.ignoreLabel', { detail: item.detail })}
-                                onClick={() => { runPendingAction(item.id, ignorePending) }}
+                                onClick={() => { runPendingAction(item, ignorePending) }}
                               >
                                 {acting ? t('settings.pending.ignoring') : t('settings.pending.ignore')}
                               </Button>
@@ -590,9 +592,10 @@ export function WatchdogSettings(props: {
                   <p className={css.hint}>{t('settings.pending.ignoredHint')}</p>
                   <ul className={css.pendingList}>
                     {ignored.map(item => {
-                      const acting = pendingAction === item.id
+                      const key = interactionKey(item.sessionId, item.id)
+                      const acting = pendingAction === key
                       return (
-                        <li key={item.id} className={css.pendingItem}>
+                        <li key={key} className={css.pendingItem}>
                           <span className={css.kind}>{t(KINDS[item.kind] ?? 'settings.kind.question')}</span>
                           <div className={css.pendingBody}>
                             <span className={css.pendingDetail}>{item.detail}</span>
@@ -606,7 +609,7 @@ export function WatchdogSettings(props: {
                               variant="outline"
                               disabled={saving || pendingAction !== null}
                               aria-label={t('settings.pending.restoreLabel', { detail: item.detail })}
-                              onClick={() => { runPendingAction(item.id, restorePending) }}
+                              onClick={() => { runPendingAction(item, restorePending) }}
                             >
                               {acting ? t('settings.pending.restoring') : t('settings.pending.restore')}
                             </Button>

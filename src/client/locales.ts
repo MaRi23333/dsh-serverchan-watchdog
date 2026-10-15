@@ -172,7 +172,7 @@ export const zh: Record<WatchdogKey, string> = {
   'settings.pending.restoreLabel': '恢复这项确认的提醒：{detail}',
   'settings.pending.ignoreHint': '卡住的确认可以忽略。忽略保存在本机，重启 DSH 后不再提醒，也可以随时恢复。',
   'settings.pending.ignoredHeading': '已忽略',
-  'settings.pending.ignoredHint': '这些确认已停止提醒。恢复后若仍然无人处理，会重新开始计时。',
+  'settings.pending.ignoredHint': '这些确认已停止提醒。恢复后仍未处理的确认会继续提醒。',
   'settings.pending.actionFailed': '操作没有完成，请稍后再试',
   'settings.pending.next': '将于约 {mins} 分钟后提醒',
   'settings.pending.next.none': '等待时长已超过阈值',

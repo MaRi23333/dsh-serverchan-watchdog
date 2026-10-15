@@ -123,12 +123,12 @@ export async function saveConfig(patch: WatchdogPatch): Promise<WatchdogConfigVi
  * Dismiss one waiting confirmation, or put it back on the watch.
  * The host writes the choice into its state file and returns the new lists.
  */
-export async function postPendingAction(id: string, restore: boolean): Promise<WatchdogStatus> {
+export async function postPendingAction(sessionId: string, id: string, restore: boolean): Promise<WatchdogStatus> {
   try {
     const response = await fetch('/serverchan-watchdog/ignore', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(restore ? { id, restore: true } : { id }),
+      body: JSON.stringify(restore ? { sessionId, id, restore: true } : { sessionId, id }),
     })
     const payload = await readJson<WatchdogStatus>(response)
     if (!response.ok || payload.ok !== true) {

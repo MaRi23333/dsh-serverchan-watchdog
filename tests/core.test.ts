@@ -143,7 +143,7 @@ test('PendingTracker.stop() before the threshold suppresses the push', async () 
   const fired: string[] = []
   const tracker = new PendingTracker({ thresholdMs: 20, repeatMs: 0, onFire: p => { fired.push(p.id) } })
   tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
-  tracker.stop('q:1')
+  tracker.stop('s', 'q:1')
   await new Promise(resolve => setTimeout(resolve, 60))
   assert.deepEqual(fired, [])
 })
@@ -153,7 +153,7 @@ test('PendingTracker repeats while active and stops after stop()', async () => {
   const tracker = new PendingTracker({ thresholdMs: 15, repeatMs: 15, onFire: p => { fired.push(p.id) } })
   tracker.start({ id: 'a:9', kind: 'approval', sessionId: 's', detail: 'd' })
   await new Promise(resolve => setTimeout(resolve, 70))
-  tracker.stop('a:9')
+  tracker.stop('s', 'a:9')
   const count = fired.length
   assert.ok(count >= 2, `expected at least 2 pushes, got ${count}`)
   await new Promise(resolve => setTimeout(resolve, 50))
@@ -167,7 +167,7 @@ test('PendingTracker.start is idempotent and stop of unknown id is a no-op', asy
   tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
   tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
   assert.equal(tracker.size, 1)
-  tracker.stop('q:unknown')
+  tracker.stop('s', 'q:unknown')
   assert.equal(tracker.size, 1)
   tracker.dispose()
 })
@@ -175,10 +175,48 @@ test('PendingTracker.start is idempotent and stop of unknown id is a no-op', asy
 test('PendingTracker.has reflects the active set', () => {
   const tracker = new PendingTracker({ thresholdMs: 1000, repeatMs: 0, onFire: () => {} })
   tracker.start({ id: 'q:1', kind: 'question', sessionId: 's', detail: 'd' })
-  assert.equal(tracker.has('q:1'), true)
-  tracker.stop('q:1')
-  assert.equal(tracker.has('q:1'), false)
+  assert.equal(tracker.has('s', 'q:1'), true)
+  tracker.stop('s', 'q:1')
+  assert.equal(tracker.has('s', 'q:1'), false)
   tracker.dispose()
+})
+
+test('PendingTracker scopes duplicate ids, timers, and stops to their session', async () => {
+  const scheduled: Array<{ fn: () => void; cancelled: boolean }> = []
+  const fired: string[] = []
+  const tracker = new PendingTracker({
+    thresholdMs: 1,
+    repeatMs: 0,
+    after: (_ms, fn) => {
+      const timer = { fn, cancelled: false }
+      scheduled.push(timer)
+      return timer
+    },
+    cancel: timer => { (timer as { cancelled: boolean }).cancelled = true },
+    onFire: pending => { fired.push(`${pending.sessionId}/${pending.id}`) },
+  })
+  try {
+    for (const sessionId of ['session-A', 'session-B']) {
+      tracker.start({ id: 'q:call-0', kind: 'question', sessionId, detail: sessionId })
+      tracker.start({ id: 'a:approval-0', kind: 'approval', sessionId, detail: sessionId })
+      tracker.start({ id: 'q:call-0', kind: 'question', sessionId, detail: 'replay' })
+    }
+    assert.equal(tracker.size, 4)
+    assert.equal(tracker.has('session-A', 'q:call-0'), true)
+    assert.equal(tracker.has('session-B', 'q:call-0'), true)
+    tracker.stop('session-A', 'q:call-0')
+    tracker.stop('session-A', 'a:approval-0')
+    assert.equal(tracker.has('session-A', 'q:call-0'), false)
+    assert.equal(tracker.has('session-B', 'q:call-0'), true)
+    for (const timer of scheduled) if (!timer.cancelled) timer.fn()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(fired, ['session-B/q:call-0', 'session-B/a:approval-0'])
+    assert.deepEqual(tracker.list().map(pending => pending.pushes), [1, 1])
+    tracker.stopWhere(pending => pending.sessionId === 'session-A')
+    assert.equal(tracker.size, 2)
+  } finally {
+    tracker.dispose()
+  }
 })
 
 test('PendingTracker uses an injected clock', () => {
@@ -325,7 +363,7 @@ test('PendingTracker bounds retryable failures to the initial attempt plus two r
     await new Promise(resolve => setImmediate(resolve))
   }
   assert.deepEqual(attempts, [1, 1, 1])
-  assert.equal(tracker.has('q:bounded'), false)
+  assert.equal(tracker.has('s', 'q:bounded'), false)
   tracker.dispose()
 })
 
@@ -342,7 +380,7 @@ test('PendingTracker stops immediately after a terminal failure', async () => {
   tracker.start({ id: 'q:terminal', kind: 'question', sessionId: 's', detail: 'd' })
   scheduled[0]?.()
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(tracker.has('q:terminal'), false)
+  assert.equal(tracker.has('s', 'q:terminal'), false)
   assert.equal(scheduled.length, 1)
 })
 
@@ -366,11 +404,11 @@ test('PendingTracker never re-arms after stop while a fire is in flight', async 
     tracker.start({ id: `q:${settle}`, kind: 'question', sessionId: 's', detail: 'd' })
     scheduled[0]?.()
     await new Promise(resolve => setImmediate(resolve))
-    tracker.stop(`q:${settle}`)
+    tracker.stop('s', `q:${settle}`)
     if (settle === 'resolve') resolveFire('retryable-failure')
     else rejectFire(new Error('boom'))
     await new Promise(resolve => setImmediate(resolve))
-    assert.equal(tracker.has(`q:${settle}`), false)
+    assert.equal(tracker.has('s', `q:${settle}`), false)
     assert.equal(scheduled.length, 1)
   }
 })

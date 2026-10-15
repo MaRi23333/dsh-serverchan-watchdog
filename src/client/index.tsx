@@ -41,8 +41,8 @@ export function apply(ctx: ClientContext): void {
         config: () => fetchConfig(),
         status: () => fetchStatus(),
         saveConfig: patch => saveConfig(patch),
-        ignorePending: id => postPendingAction(id, false),
-        restorePending: id => postPendingAction(id, true),
+        ignorePending: (sessionId, id) => postPendingAction(sessionId, id, false),
+        restorePending: (sessionId, id) => postPendingAction(sessionId, id, true),
         test: () => sendTest(),
       }),
     }, WatchdogSettings)

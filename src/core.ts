@@ -10,7 +10,7 @@ export type PendingKind = 'question' | 'plan-review' | 'approval'
 
 /** One pending human interaction being watched. */
 export interface PendingInteraction {
-  /** Registry identity: `q:<callId>` for questions, `a:<approvalId>` for approvals. */
+  /** Session-local identity: `q:<callId>` for questions, `a:<approvalId>` for approvals. */
   id: string
   kind: PendingKind
   /** Session id carrying the pending ask. */
@@ -21,6 +21,11 @@ export interface PendingInteraction {
   startedAt: number
   /** How many times a reminder was pushed so far. */
   pushes: number
+}
+
+/** Unambiguous internal key for an interaction id within its session. */
+export function interactionKey(sessionId: string, id: string): string {
+  return JSON.stringify([sessionId, id])
 }
 
 /** Outcome of one reminder attempt. */
@@ -55,7 +60,7 @@ interface Entry {
 
 /**
  * Tracks pending human interactions with threshold/repeat timers.
- * `stop()` cancels everything; a fire that settles after `stop()` is a no-op.
+ * `stop()` cancels one session's interaction; a fire settling after it is a no-op.
  */
 export class PendingTracker {
   private readonly entries = new Map<string, Entry>()
@@ -86,40 +91,44 @@ export class PendingTracker {
   }
 
   /**
-   * Begin watching one interaction. A repeat start for the same id is a no-op.
+   * Begin watching one interaction. A repeat start for the same session/id is a no-op.
    * @param entry - identity, kind, session, and display text; startedAt/pushes are filled here.
    */
   start(entry: Omit<PendingInteraction, 'startedAt' | 'pushes'> & Partial<Pick<PendingInteraction, 'startedAt'>>): void {
-    if (this.entries.has(entry.id)) return
+    const key = interactionKey(entry.sessionId, entry.id)
+    if (this.entries.has(key)) return
     const now = this.now()
     const startedAt = entry.startedAt ?? now
     const pending: PendingInteraction = { ...entry, detail: truncate(entry.detail, 500), startedAt, pushes: 0 }
     const elapsed = Math.max(0, now - startedAt)
     const delay = Math.max(0, this.thresholdMs() - elapsed)
     const timer = this.after(delay, () => { void this.fire(pending) })
-    this.entries.set(entry.id, { pending, timer, repeat: undefined, retries: 0 })
+    this.entries.set(key, { pending, timer, repeat: undefined, retries: 0 })
   }
 
   /**
    * Stop watching one interaction and cancel any scheduled repeat.
-   * @param id - the exact identity passed to {@link start}.
+   * @param sessionId - the session passed to {@link start}.
+   * @param id - the exact identity passed to {@link start} in that session.
    */
-  stop(id: string): void {
-    const entry = this.entries.get(id)
+  stop(sessionId: string, id: string): void {
+    const key = interactionKey(sessionId, id)
+    const entry = this.entries.get(key)
     if (entry === undefined) return
     this.cancel(entry.timer)
     if (entry.repeat !== undefined) this.cancel(entry.repeat)
-    this.entries.delete(id)
+    this.entries.delete(key)
   }
 
   /**
    * Whether one interaction is still being watched. A fire callback should
    * re-check this right before publishing, so a `stop()` that lands while the
    * callback awaits (e.g. an HTTP push in flight) cannot send a stale notice.
-   * @param id - the identity passed to {@link start}.
+   * @param sessionId - the session passed to {@link start}.
+   * @param id - the identity passed to {@link start} in that session.
    */
-  has(id: string): boolean {
-    return this.entries.has(id)
+  has(sessionId: string, id: string): boolean {
+    return this.entries.has(interactionKey(sessionId, id))
   }
 
   /** Snapshot of the active interactions. */
@@ -132,19 +141,19 @@ export class PendingTracker {
    * @param match - predicate over the pending entry.
    */
   stopWhere(match: (pending: PendingInteraction) => boolean): void {
-    for (const id of [...this.entries.keys()]) {
-      const entry = this.entries.get(id)
-      if (entry !== undefined && match(entry.pending)) this.stop(id)
+    for (const { pending } of [...this.entries.values()]) {
+      if (match(pending)) this.stop(pending.sessionId, pending.id)
     }
   }
 
   /** Stop every watched interaction (plugin teardown). */
   dispose(): void {
-    for (const id of [...this.entries.keys()]) this.stop(id)
+    this.stopWhere(() => true)
   }
 
   private async fire(pending: PendingInteraction): Promise<void> {
-    const entry = this.entries.get(pending.id)
+    const key = interactionKey(pending.sessionId, pending.id)
+    const entry = this.entries.get(key)
     if (entry === undefined) return
     entry.repeat = undefined
     let outcome: FireOutcome = 'delivered'
@@ -160,7 +169,7 @@ export class PendingTracker {
     } catch {
       outcome = 'retryable-failure'
     }
-    if (this.entries.get(pending.id) !== entry) return
+    if (this.entries.get(key) !== entry) return
     if (outcome === 'delivered') {
       pending.pushes += 1
       entry.retries = 0
@@ -178,12 +187,12 @@ export class PendingTracker {
         entry.retries += 1
         entry.repeat = this.after(this.retryMs(), () => { void this.fire(pending) })
       } else {
-        this.entries.delete(pending.id)
+        this.entries.delete(key)
       }
       return
     }
     // A terminal upstream response must not cause another quota-consuming call.
-    this.entries.delete(pending.id)
+    this.entries.delete(key)
   }
 }
 

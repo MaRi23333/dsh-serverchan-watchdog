@@ -1,8 +1,10 @@
 # 更新记录 / Changelog
 
-## Unreleased
+## 0.2.1（2026-10-16）
 
-- 设置页「等待中的确认」可以为卡住的项选择忽略。忽略写入本机状态，重启 DSH 后不再提醒，并可以恢复。被忽略的提问仍占着会话 FIFO 的位置，没有 callId 的结果会清掉这项忽略，而不会停掉下一项仍在等待的提醒。已忽略满 50 项时，新的忽略会被拒绝，已有记录不会被挤掉。重启恢复会按同样的 FIFO 消化日志里没有 callId 的结果，已经答完的忽略项不会再占位。同一 callId 的重复 tool/call 只算一次，关闭时会清掉全部副本。 / Pending confirmations in settings can be ignored. The dismissal is stored on this machine, so a DSH restart does not remind again, and it can be restored. An ignored question keeps its FIFO slot, so a result without a callId clears that dismissal instead of stopping the next question that is still waiting. Once 50 confirmations are ignored, another ignore is refused instead of dropping an older dismissal. Restart recovery applies that same FIFO to callId-less results already in the log, so an answered dismissal does not come back as a placeholder. A replayed tool/call with the same callId counts once, and closing it drops every copy.
+- 设置页可以忽略卡住的确认，立即停止该项提醒，重启后保留；也可随时恢复。忽略不会批准或回答原确认，也不会覆盖尚未保存的配置草稿。 / Stuck confirmations can be ignored from settings to stop their alerts immediately, with the choice preserved across restarts. Alerts can be restored at any time. These actions do not approve or answer the request or overwrite unsaved settings drafts.
+- 确认按会话分别识别，两个会话使用相同调用或审批 ID 时互不影响。已忽略满 50 项时会提示先恢复一项，不会悄悄删除已有记录。 / Confirmations are scoped to their session: matching call or approval IDs in different sessions do not affect each other. At 50 ignored items, new dismissals are refused with a prompt to restore one first; existing records are not silently evicted.
+- 修复重启恢复、无调用 ID 的结果配对和重复事件回放，避免已处理项重新提醒，或误停下一项提醒。 / Restart recovery, results without call IDs, and replayed events are handled consistently, preventing answered items from reappearing or stopping alerts for the next pending item.
 
 ## 0.2.0（2026-10-07）
 
