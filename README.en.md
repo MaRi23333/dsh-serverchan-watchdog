@@ -99,6 +99,40 @@ For local development:
 dsh plugin --profile web add /absolute/path/to/dsh-serverchan-watchdog
 ```
 
+## First notification
+
+After installing and enabling the plugin, open **Settings → ServerChan alerts**. Have your SendKey or full push URL ready; if you have not set up ServerChan yet, follow the official guide linked under [Configuration](#configuration).
+
+### 1. Save your push settings
+
+Enter the SendKey or full push URL under **Push channel**, turn on the master switch, and press **Save settings**. Changes take effect only after saving. A stored SendKey is not shown again; leaving the field empty keeps the existing value.
+
+### 2. Receive a test message on your phone
+
+Press **Send test push**, then check WeChat (ServerChan Turbo) or the ServerChan³ app for a message titled `DSH ServerChan 配置测试`. The test uses saved settings: a SendKey or proxy you have entered but not saved is not used. You can also send a test while alerts are paused.
+
+Receiving this message confirms that the push channel works. Next, leave a real question unanswered to check that the plugin detects it.
+
+### 3. Leave a question waiting for an alert
+
+1. Note the current value of **Alert after no reply for**, temporarily set it to **1 minute**, and save. This change applies only to waits that start after saving.
+2. Send the following request in a DSH conversation. When the question card appears, leave it unanswered:
+
+   ```text
+   Call the ask_user_question tool to ask me a test question in a question card. Then wait for my reply; do not continue on your own.
+   ```
+
+3. Find the question under **Pending confirmations** in the settings page. The list refreshes roughly every 10 seconds. A question written as ordinary chat text is not monitored.
+4. After the question has waited for 1 minute, check your phone for an alert. Once it arrives, answer the question in DSH; the entry will disappear when the list refreshes. This confirms detection and delivery for this question. Repeats are off by default, so each wait gets one alert.
+5. Restore your original alert delay and save (the default is 5 minutes).
+
+If no alert arrives, check which of these cases applies:
+
+- **The question is missing from the list:** confirm that DSH actually called `ask_user_question` and displayed an interactive card, and that the plugin is enabled in the client you are using.
+- **The question is listed, but no alert arrives:** confirm that the master switch is on and the credential is saved, then send another test push. If the test also fails, use the error message to check your credential and network connection. If you configured a proxy, check that it is reachable. Pausing alerts defers delivery.
+
+Phone notifications cannot be used to answer questions or approve actions remotely, and they are not task-completion notices. Return to the desktop client or Web interface to handle the waiting interaction.
+
 ## Configuration
 
 After installing and enabling the plugin, open DSH **Settings → ServerChan alerts** in the desktop client or Web interface you use.
