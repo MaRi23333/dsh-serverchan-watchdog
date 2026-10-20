@@ -50,18 +50,46 @@
 
 ## 安装
 
-推荐从 npm 安装稳定版本：
+### 桌面客户端（推荐）
 
-```powershell
-dsh plugin --profile web add dsh-serverchan-watchdog
+桌面客户端与 Web 的插件安装和启用状态各自独立；在 Web 安装不会自动在桌面端启用。桌面图形界面安装无需配置 PATH。
 
-# PATH 中没有 dsh 时
-npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-serverchan-watchdog
+1. 打开桌面客户端，进入侧栏 **插件（Plugins）** → **添加插件（Add plugin）**。
+2. 输入 npm 包名 `dsh-serverchan-watchdog@latest` 并安装。
+3. 安装完成后点击 **立即启用（Enable now）**；只关闭安装完成对话框会让插件保持停用。
+4. 仅在界面提示需要重启时，通过应用菜单 **退出（Quit）** 完整退出再重开。关闭窗口可能只是隐藏应用。
+
+启用后可在设置页中找到 **Server酱推送小助手**；页面顶部有总开关和实时状态。
+
+<details>
+<summary>备用：使用桌面随附 CLI（Windows / macOS）</summary>
+
+先启动桌面客户端一次以完成初始化。在应用菜单打开 **Manage dsh Command…** → **Install**，注册桌面随附的 `dsh` 命令，再打开新终端；若界面报告 PATH 冲突，先按其提示处理。
+
+通过 **Quit** 完整退出桌面客户端后，使用刚注册的桌面随附 CLI：
+
+```sh
+dsh plugin --profile desktop add dsh-serverchan-watchdog@latest
+dsh plugin --profile desktop list
 ```
 
-如果此前通过 GitHub 安装，重新执行上面的 npm 命令即可切换到 npm 渠道。需要主动跟随后续 `main` 时，也可以使用滚动安装；它不具备稳定版本的可复现性：
+完成后重开桌面客户端。npm 安装的 `dsh` 和 `npx` 不能管理 `desktop` profile。命令注册说明见[官方桌面文档](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.1-rc.2/apps/desktop/README.md#bundled-command-runtime)。
 
-```powershell
+</details>
+
+### Web
+
+以下命令只管理 Web 的插件。使用启动该 Web 实例的同一套、与宿主版本匹配的 `dsh` CLI，从 npm 安装稳定版本：
+
+```sh
+dsh plugin --profile web add dsh-serverchan-watchdog@latest
+```
+
+安装后停止当前 `dsh web` 进程，用同一套 CLI 重新运行 `dsh web`，再刷新页面。
+
+**渠道切换**：如果此前通过 GitHub 或本地目录安装，重新执行上面的 npm `@latest` 命令即可切换到 npm 渠道。需要主动跟随后续 `main` 时，也可以使用滚动安装；它不具备稳定版本的可复现性：
+
+```sh
 dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog
 ```
 
@@ -71,11 +99,9 @@ dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog
 dsh plugin --profile web add E:\path\to\dsh-serverchan-watchdog
 ```
 
-安装后请从普通终端重启 `dsh web`。
-
 ## 配置
 
-重启后打开 DSH 设置页 → 插件 → **Server酱推送小助手**。
+安装并启用后，在你使用的桌面客户端或 Web 界面中打开 DSH **设置 → Server酱推送小助手**。
 
 第一次使用 Server酱：先按[官方 SendKey 指南](https://sct.ftqq.com/docs/getting-started/sendkey/)开通 [Server酱 Turbo](https://sct.ftqq.com/)（通常推送到微信）或 [Server酱³](https://sc3.ft07.com/)（推送到独立 App），再把控制台给出的 SendKey 或完整推送地址填入下方设置。
 

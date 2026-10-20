@@ -50,16 +50,44 @@ This update targets DSH `0.2.0-rc.2` and the desktop client of the same version.
 
 ## Install
 
-Install the stable release from npm:
+### Desktop client (recommended)
+
+Desktop and Web have separate plugin installations and activation states; installing for Web does not enable the desktop plugin. The desktop GUI route needs no PATH setup.
+
+1. In the desktop sidebar, open **Plugins** → **Add plugin**.
+2. Enter the npm package name `dsh-serverchan-watchdog@latest` and install it.
+3. Click **Enable now** when installation finishes. Closing the completed-install dialog leaves the plugin disabled.
+4. Restart only if the UI asks you to: fully exit with **Quit** in the application menu, then reopen the app. Closing a window may only hide it.
+
+Once enabled, find **ServerChan alerts** in Settings; the page has a master switch and live status at the top.
+
+<details>
+<summary>Alternative: use the desktop-bundled CLI (Windows / macOS)</summary>
+
+Start the desktop client once to initialize it. In the application menu, open **Manage dsh Command…** → **Install** to register its bundled `dsh` command, then open a new terminal. If the UI reports a PATH conflict, follow its instructions first.
+
+Fully exit the desktop client with **Quit**, then use the newly registered desktop-bundled CLI:
 
 ```sh
-dsh plugin --profile web add dsh-serverchan-watchdog
-
-# when dsh is not on PATH
-npx -p @deepseek-ai/dsh dsh plugin --profile web add dsh-serverchan-watchdog
+dsh plugin --profile desktop add dsh-serverchan-watchdog@latest
+dsh plugin --profile desktop list
 ```
 
-If you previously installed from GitHub, rerun the npm command above to switch channels. Use the unpinned GitHub form only when you intentionally want a rolling install that follows `main`:
+Reopen the desktop client afterwards. An npm-installed `dsh` or `npx` cannot manage the `desktop` profile. See the [official desktop command documentation](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.1-rc.2/apps/desktop/README.md#bundled-command-runtime).
+
+</details>
+
+### Web
+
+These commands manage Web plugins only. Use the same `dsh` CLI that starts your Web instance, matching that host's version, to install the stable release from npm:
+
+```sh
+dsh plugin --profile web add dsh-serverchan-watchdog@latest
+```
+
+After installation, stop the running `dsh web` process, start `dsh web` again with the same CLI, and refresh the page.
+
+**Switching channels:** if you previously installed from GitHub or a local checkout, rerun the npm `@latest` command above to switch to npm releases. Use the unpinned GitHub form only when you intentionally want a rolling install that follows `main`:
 
 ```sh
 dsh plugin --profile web add github:MaRi23333/dsh-serverchan-watchdog
@@ -71,11 +99,9 @@ For local development:
 dsh plugin --profile web add /absolute/path/to/dsh-serverchan-watchdog
 ```
 
-Restart `dsh web` from a normal terminal after installation.
-
 ## Configuration
 
-Open DSH settings → Plugins → **ServerChan alerts** after the restart.
+After installing and enabling the plugin, open DSH **Settings → ServerChan alerts** in the desktop client or Web interface you use.
 
 New to ServerChan? Follow the official [SendKey guide](https://sct.ftqq.com/docs/getting-started/sendkey/) and set up either [ServerChan Turbo](https://sct.ftqq.com/) (commonly delivered through WeChat) or [ServerChan³](https://sc3.ft07.com/) (the standalone app), then paste the console-provided SendKey or complete push URL below.
 
