@@ -1,5 +1,12 @@
 # 更新记录 / Changelog
 
+## 0.2.2（2026-10-22）
+
+- 将网络请求依赖 Undici 升级到 `7.30.1`，包含上游 2026 年 10 月的安全修复；声明下限同步提高到 `^7.30.1`。
+- Updated the HTTP dependency Undici to `7.30.1`, including upstream security fixes from October 2026, and raised the declared minimum to `^7.30.1`.
+- 提醒逻辑、SendKey 存储和现有配置不变；建议更新插件并重启 DSH。
+- Reminder behavior, SendKey storage, and existing configuration are unchanged; update the plugin and restart DSH.
+
 ## 0.2.1（2026-10-16）
 
 - 设置页可以忽略卡住的确认，立即停止该项提醒，重启后保留；也可随时恢复。忽略不会批准或回答原确认，也不会覆盖尚未保存的配置草稿。 / Stuck confirmations can be ignored from settings to stop their alerts immediately, with the choice preserved across restarts. Alerts can be restored at any time. These actions do not approve or answer the request or overwrite unsaved settings drafts.

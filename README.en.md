@@ -46,7 +46,7 @@ The default threshold is five minutes and one successful alert per interaction. 
 
 This update targets DSH `0.2.0-rc.2` and the desktop client of the same version. The development team reports it working after migration, and runtime versions and bundle admission requirements have been checked. The desktop settings UI, real background alerts and notification-client handling of `dsh://` still need validation in the actual environment; load compatibility is not end-to-end acceptance.
 
-**0.2.1** adds Ignore / Restore alerts for stuck confirmations. Ignoring takes effect immediately, survives a restart, and affects only that item in its session; it does not approve or answer the original request. Existing settings drafts are neither saved nor discarded by these actions. See [CHANGELOG.md](./CHANGELOG.md) for the full update.
+**0.2.2** updates the HTTP dependency Undici to `7.30.1`, including upstream security fixes, without changing reminder behavior or existing configuration. The earlier `0.2.1` update added Ignore / Restore alerts for stuck confirmations. Ignoring takes effect immediately, survives a restart, and affects only that item in its session; it does not approve or answer the original request. Existing settings drafts are neither saved nor discarded by these actions. See [CHANGELOG.md](./CHANGELOG.md) for the full update.
 
 ## Install
 
