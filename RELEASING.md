@@ -35,15 +35,14 @@ The owner can inspect the saved relationship with:
 npm trust list dsh-serverchan-watchdog --json --registry=https://registry.npmjs.org/
 ```
 
-npm may require another browser 2FA flow even for `trust list`. The first
-end-to-end proof will be the next real Release-driven npm version and its
-registry provenance.
+npm may require another browser 2FA flow even for `trust list`. Setup is not a
+per-release step; inspect or repair the binding only when needed.
 
 The owner completed the Trusted Publisher binding from an interactive terminal
 on 2026-08-28. It targets `MaRi23333/dsh-serverchan-watchdog`, `publish.yml`, no
 GitHub Actions environment, and publish permission only. Do not treat that
-one-time setup receipt as an end-to-end release test; the next real version must
-still verify the workflow run, registry `latest`, and provenance.
+one-time setup receipt as proof for a new candidate. Verify the workflow run,
+registry `latest`, and provenance for every release.
 
 ## 1. Prepare and verify the version
 
@@ -68,9 +67,10 @@ clean after committing the release candidate.
 Create an **annotated** tag whose name is exactly `v${version}`:
 
 ```sh
-git tag -a v0.1.2 -m "dsh-serverchan-watchdog v0.1.2"
+version=$(node -p "require('./package.json').version")
+git tag -a "v$version" -m "dsh-serverchan-watchdog v$version"
 git push origin main
-git push origin v0.1.2
+git push origin "v$version"
 ```
 
 Do not use a lightweight tag and never move an existing published tag. The
