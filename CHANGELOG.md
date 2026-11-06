@@ -1,5 +1,10 @@
 # 更新记录 / Changelog
 
+## 0.2.3（2026-11-06）
+
+- 使用 DSH 原生设置图标插槽，恢复新版设置侧栏的铃铛图标，尺寸随宿主调整。
+- Use the native DSH settings icon slot to restore the bell icon in the updated settings sidebar and follow the host's icon size.
+
 ## 0.2.2（2026-10-22）
 
 - 将网络请求依赖 Undici 升级到 `7.30.1`，包含上游 2026 年 10 月的安全修复；声明下限同步提高到 `^7.30.1`。

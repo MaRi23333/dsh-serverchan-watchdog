@@ -14,7 +14,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { WatchdogSettings, type WatchdogSettingsInjected } from './SettingsCard.tsx'
 import { en, zh } from './locales.ts'
 import { fetchConfig, fetchStatus, postPendingAction, saveConfig, sendTest } from './api.ts'
-import { decorateSettingsNavIcon } from './nav-icon.ts'
+import { registerSettingsNavIcon } from './nav-icon.ts'
 
 const NS = 'serverchan-watchdog'
 
@@ -60,5 +60,5 @@ export function apply(ctx: ClientContext): void {
     }
   })
 
-  decorateSettingsNavIcon(ctx)
+  registerSettingsNavIcon(ctx)
 }

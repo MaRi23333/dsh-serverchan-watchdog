@@ -54,77 +54,64 @@ interface SectionModule {
 }
 
 /** Materialize the built bundle and drive apply() up to the registration. */
-function loadSection(): { component: unknown, injected: unknown, options: Record<string, unknown> } {
+function loadSection(): { component: unknown, injected: unknown, options: Record<string, unknown>, icon: { component: unknown, options: Record<string, unknown> } } {
   const source = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
   let captured: { factory: (require: (id: string) => unknown) => SectionModule } | null = null
   const windowStub: Record<string, unknown> = {
     __ModuleLoader__: { load: (entry: unknown) => { captured = entry as never } },
   }
   // The bundle injects its stylesheet at factory execution, so `document` has
-  // to exist before it runs even though nothing is really painted here. The nav
-  // decorator also constructs a MutationObserver at apply() time, so the
-  // observer global is part of the surface the shell provides and must exist.
+  // to exist before it runs even though nothing is really painted here.
   const documentStub = {
     querySelector: () => null,
     createElement: () => ({ dataset: {} as Record<string, string>, textContent: '' }),
     head: { appendChild: () => {} },
-    body: {},
   }
-  class ObserverStub {
-    observe(): void {}
-    disconnect(): void {}
-    takeRecords(): unknown[] { return [] }
+  const factory = new Function('window', 'document', source) as (w: unknown, d: unknown) => void
+  factory(windowStub, documentStub)
+
+  const entry = captured as unknown as { factory: (r: (id: string) => unknown) => SectionModule }
+  assert.ok(entry !== null, 'bundle did not call window.__ModuleLoader__.load')
+  // Only the specifiers the bundle actually requires are served; anything else
+  // must fail loudly rather than silently resolve to undefined.
+  const stubRequire = (id: string): unknown => {
+    if (id === 'react') return require_('react')
+    if (id === 'react/jsx-runtime') return require_('react/jsx-runtime')
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return PRIMITIVE_STUBS
+    throw new Error(`unexpected require: ${id}`)
   }
-  const globals = globalThis as unknown as Record<string, unknown>
-  const saved = globals['MutationObserver']
-  globals['MutationObserver'] = ObserverStub
-  try {
-    const factory = new Function('window', 'document', source) as (w: unknown, d: unknown) => void
-    factory(windowStub, documentStub)
+  const moduleExports = entry.factory(stubRequire)
+  assert.equal(typeof moduleExports.apply, 'function')
+  assert.ok(Array.isArray(moduleExports.inject))
 
-    const entry = captured as unknown as { factory: (r: (id: string) => unknown) => SectionModule }
-    assert.ok(entry !== null, 'bundle did not call window.__ModuleLoader__.load')
-    // Only the specifiers the bundle actually requires are served; anything else
-    // must fail loudly rather than silently resolve to undefined.
-    const stubRequire = (id: string): unknown => {
-      if (id === 'react') return require_('react')
-      if (id === 'react/jsx-runtime') return require_('react/jsx-runtime')
-      if (id === '@deepseek-ai/dsh-client-ui-primitives') return PRIMITIVE_STUBS
-      throw new Error(`unexpected require: ${id}`)
-    }
-    const moduleExports = entry.factory(stubRequire)
-    assert.equal(typeof moduleExports.apply, 'function')
-    assert.ok(Array.isArray(moduleExports.inject))
-
-    let registration: { component: unknown, options: Record<string, unknown> } | null = null
-    const ctx = {
-      locale: { register: () => () => {}, bind: () => (key: string) => key },
-      slots: {
-        register: (options: unknown, component: unknown) => {
-          registration = { component, options: options as Record<string, unknown> }
-          return () => {}
-        },
-        inject: (_name: string, fn: () => unknown) => fn(),
+  const registrations: Array<{ component: unknown, options: Record<string, unknown> }> = []
+  const ctx = {
+    locale: { register: () => () => {}, bind: () => (key: string) => key },
+    slots: {
+      register: (options: unknown, component: unknown) => {
+        registrations.push({ component, options: options as Record<string, unknown> })
+        return () => {}
       },
-      effect: (fn: () => unknown) => fn(),
-      on: () => () => {},
-    }
-    moduleExports.apply(ctx as never)
+      inject: (_name: string, fn: () => unknown) => fn(),
+    },
+    effect: (fn: () => unknown) => fn(),
+    on: () => () => {},
+  }
+  moduleExports.apply(ctx as never)
 
-    const found = registration as unknown as { component: unknown, options: Record<string, unknown> }
-    assert.ok(found !== null, 'apply() registered no settings section')
-    return {
-      component: found.component,
-      injected: (found.options['inject'] as () => unknown)?.() ?? {},
-      options: found.options,
-    }
-  } finally {
-    if (saved === undefined) delete globals['MutationObserver']
-    else globals['MutationObserver'] = saved
+  const found = registrations.find(entry => entry.options['name'] === 'settings.section')
+  const icon = registrations.find(entry => entry.options['name'] === 'settings.section.icon')
+  assert.ok(found !== undefined, 'apply() registered no settings section')
+  assert.ok(icon !== undefined, 'apply() registered no settings icon')
+  return {
+    component: found.component,
+    injected: (found.options['inject'] as () => unknown)?.() ?? {},
+    options: found.options,
+    icon,
   }
 }
 
-const { component: Component, injected, options } = loadSection()
+const { component: Component, injected, options, icon } = loadSection()
 
 test('the bundle arrives as a module-loader closure under its own id', () => {
   const source = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
@@ -158,6 +145,22 @@ test('the section declares the services it needs', () => {
   const match = source.match(/inject = (\[[^\]]*\])/)
   assert.ok(match !== null, 'no inject declaration in the bundle')
   assert.deepEqual(JSON.parse(match[1]), ['slots', 'locale'])
+})
+
+test('the native settings icon matches the section id and follows the host size', () => {
+  assert.equal(icon.options['id'], options['id'])
+  assert.equal(typeof icon.component, 'function')
+  const render = icon.component as (props: { size: number, active: boolean }) => { type: unknown, props: Record<string, unknown> }
+  for (const active of [false, true]) {
+    const svg = render({ size: 20, active })
+    assert.equal(svg.type, 'svg')
+    assert.equal(svg.props['width'], 20)
+    assert.equal(svg.props['height'], 20)
+    assert.equal(svg.props['stroke'], 'currentColor')
+    assert.equal(svg.props['aria-hidden'], 'true')
+  }
+  const source = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
+  assert.ok(!source.includes('MutationObserver'), 'settings icon still observes page mutations')
 })
 
 test('the stylesheet is injected under a plugin-scoped tag and hardcodes no colors', () => {
