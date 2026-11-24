@@ -8,7 +8,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-serverchan-watchdog)](https://www.npmjs.com/package/dsh-serverchan-watchdog)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-43853d)
 ![DeepSeek Harness 0.2.0-rc.2](https://img.shields.io/badge/DeepSeek_Harness-0.2.0--rc.2-4d6bfe)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 ![Unofficial](https://img.shields.io/badge/status-unofficial-lightgrey)
 
 When an approval, plan review, or `ask_user_question` response remains pending past the configured threshold, this plugin sends a mobile alert through ServerChan from the DeepSeek Harness (DSH) host—even with the browser closed.
@@ -44,7 +44,7 @@ The default threshold is five minutes and one successful alert per interaction. 
 
 ## Host and desktop compatibility
 
-This update targets DSH `0.2.0-rc.2` and the desktop client of the same version. The development team reports it working after migration, and runtime versions and bundle admission requirements have been checked. The desktop settings UI, real background alerts and notification-client handling of `dsh://` still need validation in the actual environment; load compatibility is not end-to-end acceptance.
+This version targets DSH `0.2.0-rc.2` and its matching desktop client. The developer confirmed the plugin loads after migration. Configure notifications in desktop settings, then trigger a reminder and check that it reaches your phone. Alerts have no link by default. If you set the link to `dsh://open`, test it on a computer with DSH installed. Tapping it on a phone cannot open DSH on your computer.
 
 **0.2.2** updates the HTTP dependency Undici to `7.30.1`, including upstream security fixes, without changing reminder behavior or existing configuration. The earlier `0.2.1` update added Ignore / Restore alerts for stuck confirmations. Ignoring takes effect immediately, survives a restart, and affects only that item in its session; it does not approve or answer the original request. Existing settings drafts are neither saved nor discarded by these actions. See [CHANGELOG.md](./CHANGELOG.md) for the full update.
 
@@ -213,4 +213,6 @@ CI runs equivalent gates on Node.js 22 and 24. `autoInstallPeers:false` is inten
 
 ## License
 
-[MIT](./LICENSE)
+[Apache-2.0](./LICENSE)
+
+Copyright (c) 2026 dsh-serverchan-watchdog contributors.

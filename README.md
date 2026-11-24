@@ -8,7 +8,7 @@
 [![npm](https://img.shields.io/npm/v/dsh-serverchan-watchdog)](https://www.npmjs.com/package/dsh-serverchan-watchdog)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-43853d)
 ![DeepSeek Harness 0.2.0-rc.2](https://img.shields.io/badge/DeepSeek_Harness-0.2.0--rc.2-4d6bfe)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 ![Unofficial](https://img.shields.io/badge/status-unofficial-lightgrey)
 
 当 DeepSeek Harness（DSH）等待审批、计划评审或 `ask_user_question` 答复超过设定时间，本插件会从 DSH 主机端经 Server酱发送手机提醒；无需保持浏览器页面打开。
@@ -44,7 +44,7 @@
 
 ## 宿主与桌面端兼容
 
-本轮目标宿主为 DSH `0.2.0-rc.2` 与同版本桌面客户端。开发侧报告迁移后可用，运行时版本与 bundle 准入条件已核对；桌面设置页、真实后台提醒及通知客户端中的 `dsh://` 点击链路仍需按实际使用环境验证，不把加载兼容等同于端到端验收。
+本版面向 DSH `0.2.0-rc.2` 和同版本桌面客户端。开发者已在迁移后确认插件可加载。可以在桌面设置页配置推送，按下方「第一次收到提醒」在手机上收一条。通知默认不带链接；如果填了 `dsh://open`，请在装有 DSH 的电脑上测试能否打开客户端。手机不能用它远程唤起电脑。
 
 **0.2.2** 将网络请求依赖 Undici 升级到 `7.30.1`，包含上游安全修复，提醒逻辑与现有配置不变。此前 `0.2.1` 新增卡住确认的「忽略 / 恢复提醒」：忽略立即生效、重启后保留，只影响所选会话中的那一项，不会批准或回答原来的确认。已有配置草稿不会因此保存或丢失。完整变更见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -213,4 +213,6 @@ CI 在 Node.js 22/24 上执行同等门禁。项目使用 `autoInstallPeers:fals
 
 ## License
 
-[MIT](./LICENSE)
+[Apache-2.0](./LICENSE)
+
+Copyright (c) 2026 dsh-serverchan-watchdog contributors.

@@ -1,5 +1,12 @@
 # 更新记录 / Changelog
 
+## 0.2.4（2026-11-24）
+
+- 明确桌面端首次推送验证，以及如何在装有 DSH 的电脑上打开通知链接。
+- 新版本采用 Apache-2.0 许可，既有已发布版本的许可继续有效。
+- Clarify how to test the first push notification and open links on a computer running DSH.
+- This release adopts Apache-2.0. Previously published releases retain their original licenses.
+
 ## 0.2.3（2026-11-06）
 
 - 使用 DSH 原生设置图标插槽，恢复新版设置侧栏的铃铛图标，尺寸随宿主调整。
